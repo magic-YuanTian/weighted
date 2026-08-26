@@ -443,3 +443,41 @@
   border-radius:4px; padding:10px 12px;
 }
 .wt4 .doc .filetext.code:focus { background:var(--surface-2); box-shadow:inset 0 0 0 1px var(--accent-line); }
+
+/* ---- attachments: chip in the stream, sheet for the contents ------------ */
+.wt4 .attachrow { display:flex; flex-wrap:wrap; gap:6px; padding:2px 0 4px; }
+.wt4 .filechip {
+  display:inline-flex; align-items:center; gap:7px;
+  border:1px solid var(--line-2); border-radius:5px; background:var(--surface);
+  padding:5px 9px; font-size:12px; color:var(--ink-2); max-width:100%;
+}
+.wt4 .filechip:hover { border-color:var(--accent-line); background:var(--accent-soft); color:var(--accent); }
+.wt4 .filechip .ic { color:var(--accent); font-size:13px; line-height:1; }
+.wt4 .filechip .nm { font-family:var(--mono); font-size:11.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wt4 .filechip .sz { font-family:var(--mono); font-size:10.5px; color:var(--ink-3); flex:none; }
+
+.wt4 .sheet {
+  position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center;
+  background:rgba(19,21,27,.34); padding:32px;
+}
+.wt4 .sheetbox {
+  display:flex; flex-direction:column; width:min(940px,100%); max-height:100%;
+  background:var(--surface); border:1px solid var(--line-2); border-radius:7px;
+  box-shadow:0 12px 40px rgba(19,21,27,.22); overflow:hidden;
+}
+.wt4 .sheethead {
+  flex:none; display:flex; align-items:center; gap:10px; padding:10px 14px;
+  border-bottom:1px solid var(--line); background:var(--surface-2);
+}
+.wt4 .sheethead .ic { color:var(--accent); }
+.wt4 .sheethead b { font-family:var(--mono); font-size:12px; }
+.wt4 .sheethead .muted { font-family:var(--mono); font-size:11px; }
+.wt4 .sheethead .linkbtn { margin-left:auto; }
+.wt4 .sheetbody { overflow:auto; padding:12px 14px 18px; }
+.wt4 .sheetbody pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.6; white-space:pre; }
+.wt4 .sheetbody .muted { font-size:12px; padding-top:10px; display:block; }
+
+.wt4 table.csv { border-collapse:collapse; font-family:var(--mono); font-size:11.5px; }
+.wt4 table.csv td { border-bottom:1px solid var(--line); padding:3px 10px 3px 0; white-space:nowrap; vertical-align:top; }
+.wt4 table.csv tr.hd td { position:sticky; top:0; background:var(--surface); font-weight:600; color:var(--ink); border-bottom:1px solid var(--line-2); }
+.wt4 table.csv td.ln { color:var(--ink-3); text-align:right; padding-right:12px; font-variant-numeric:tabular-nums; user-select:none; }

@@ -11,7 +11,7 @@ import os
 import time
 import uuid
 
-from .tools import Workspace
+from .tools import Attachments, Workspace
 from . import requirements as R
 
 RUNS_DIR = os.environ.get(
@@ -27,6 +27,9 @@ class Session:
         self.brief = brief or ""
         self.root = os.path.join(RUNS_DIR, self.id)
         self.workspace = Workspace(os.path.join(self.root, "workspace"))
+        # reference material, deliberately outside the workspace so the
+        # requirement checker never sees it
+        self.attachments = Attachments(os.path.join(self.root, "attachments"))
         self.requirements = []
         self.events = []
         self.llm_messages = []
@@ -61,6 +64,7 @@ class Session:
             "events": self.events,
             "files": [{"path": f, "text": self.workspace.read(f)}
                       for f in self.workspace.list()],
+            "attachments": self.attachments.meta(),
             "questions": self.questions,
             "unmapped": self.unmapped,
         }
@@ -74,6 +78,7 @@ class Session:
                 "requirements": self.requirements, "events": self.events,
                 "questions": self.questions,
                 "files": {f: self.workspace.read(f) for f in self.workspace.list()},
+                "attachments": [a["name"] for a in self.attachments.meta()],
             }, fh, ensure_ascii=False, indent=2)
 
 

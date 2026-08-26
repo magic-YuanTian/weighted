@@ -59,8 +59,66 @@ def presets():
             if not os.path.exists(path):
                 continue
             with open(path, encoding="utf-8") as fh:
-                out.append({**t, "brief": fh.read()})
+                brief = fh.read()
+            att = []
+            for name in (t.get("attachments") or []):
+                p = os.path.join(TASKS_DIR, "data", name)
+                if not os.path.exists(p):
+                    continue
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                att.append({"name": name, "chars": len(text),
+                            "lines": text.count("\n") + 1})
+            out.append({**t, "brief": brief, "attachments": att})
         return jsonify({"tasks": sorted(out, key=lambda t: t.get("n", 0))})
+    except Exception as e:                                    # noqa: BLE001
+        return _fail(e)
+
+
+
+
+@bp.route("/attach", methods=["POST"])
+def attach():
+    """Copy one of the shipped data files into this session as read-only
+    reference material. Attachments never enter the workspace, so they are
+    invisible to the requirement checker."""
+    try:
+        s, data = _session()
+        names = data.get("names") or ([data["name"]] if data.get("name") else [])
+        added = []
+        for name in names:
+            src = os.path.join(TASKS_DIR, "data", os.path.basename(name))
+            if not os.path.exists(src):
+                return jsonify({"error": f"no such data file: {name}"}), 404
+            with open(src, encoding="utf-8", errors="replace") as fh:
+                s.attachments.add(os.path.basename(name), fh.read())
+            added.append(os.path.basename(name))
+        if added:
+            s.log("attach", names=added)
+            s.save()
+        return jsonify(s.snapshot())
+    except LookupError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:                                    # noqa: BLE001
+        return _fail(e)
+
+
+@bp.route("/attachment", methods=["GET"])
+def attachment():
+    """The full text of one attachment, for the preview panel."""
+    try:
+        s = sessions.get(request.args.get("sessionId"))
+        if s is None:
+            raise LookupError("unknown sessionId")
+        name = request.args.get("name") or ""
+        text = s.attachments.read(name)
+        if text is None:
+            return jsonify({"error": f"no such attachment: {name}"}), 404
+        return jsonify({"name": name, "text": text})
+    except LookupError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:                                    # noqa: BLE001
+        return _fail(e)
     except Exception as e:                                    # noqa: BLE001
         return _fail(e)
 

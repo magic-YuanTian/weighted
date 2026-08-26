@@ -127,6 +127,67 @@ const PromptText = React.memo(function PromptText({ text, reqs, selected, onSele
   return <>{parts}</>;
 });
 
+/* Clicking a file chip opens the attachment as the user would expect: the real
+   contents, in a code face, scrollable. CSV gets light column alignment so a
+   data table is readable rather than a wall of commas. */
+function AttachmentViewer({ sessionId, name, onClose }) {
+  const [text, setText] = useState(null);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    let live = true;
+    api.attachment(sessionId, name)
+      .then((d) => { if (live) setText(d.text); })
+      .catch((e) => { if (live) setErr(e.message); });
+    return () => { live = false; };
+  }, [sessionId, name]);
+
+  useEffect(() => {
+    const esc = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, [onClose]);
+
+  const rows = (text || '').split('\n');
+  const isCsv = /\.(csv|tsv)$/i.test(name);
+  const cells = isCsv ? rows.map((r) => r.split(',')) : null;
+
+  return (
+    <div className="sheet" role="dialog" aria-label={name} onClick={onClose}>
+      <div className="sheetbox" onClick={(e) => e.stopPropagation()}>
+        <div className="sheethead">
+          <span className="ic" aria-hidden="true">▤</span>
+          <b>{name}</b>
+          <span className="muted">
+            {text === null ? 'loading…' : `${rows.length.toLocaleString()} lines · ${text.length.toLocaleString()} characters`}
+          </span>
+          <button className="linkbtn" onClick={onClose}>close</button>
+        </div>
+        <div className="sheetbody">
+          {err && <div className="err">{err}</div>}
+          {text !== null && isCsv && (
+            <table className="csv">
+              <tbody>
+                {cells.slice(0, 500).map((row, i) => (
+                  <tr key={i} className={i === 0 ? 'hd' : ''}>
+                    <td className="ln">{i === 0 ? '' : i}</td>
+                    {row.map((c, j) => <td key={j}>{c}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {text !== null && !isCsv && <pre>{text}</pre>}
+          {text !== null && isCsv && cells.length > 500 && (
+            <p className="muted">…{(cells.length - 500).toLocaleString()} more rows. The agent reads the whole file.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function RunStream({ snap, focus, running, pending, busy, outbox, onRun, onPause,
                                     onSend, onAnswer, onSelectReq, onJump, selected }) {
   const [openSteps, setOpenSteps] = useState(() => new Set());
@@ -135,6 +196,7 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
   // without a licence and stay out of the repo. No tasks, no picker.
   const [tasks, setTasks] = useState([]);
   const [picked, setPicked] = useState('');
+  const [preview, setPreview] = useState(null);
   const [hitStep, setHitStep] = useState(null);
   const scrollRef = useRef(null);
 
@@ -192,7 +254,16 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
   const submit = async () => {
     const t = text.trim();
     if (!t) return;
+    const chosen = tasks.find((x) => x.id === picked);
+    const files = (chosen && chosen.attachments) || [];
     setText('');                     // the message moves to the stream at once
+    // attach first: the agent reads the data on its very first step, so it has
+    // to be there before the brief arrives
+    if (files.length && snap && snap.sessionId) {
+      try {
+        await api.attach(snap.sessionId, files.map((f) => f.name));
+      } catch (e) { /* the run can still proceed; the digest will show nothing */ }
+    }
     const ok = await onSend(t);
     if (ok === false) setText(t);    // …and comes back if the send failed
   };
@@ -270,6 +341,26 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                         onSelectReq={onSelectReq}
                       />
                     ) : ev.text}
+                  </div>
+                );
+              case 'attach':
+                return (
+                  <div className="attachrow" key={ev.i}>
+                    {(ev.names || []).map((n) => {
+                      const a = ((snap && snap.attachments) || []).find((x) => x.name === n);
+                      return (
+                        <button
+                          key={n}
+                          className="filechip"
+                          onClick={() => setPreview(n)}
+                          title="open the attached file"
+                        >
+                          <span className="ic" aria-hidden="true">▤</span>
+                          <span className="nm">{n}</span>
+                          {a && <span className="sz">{a.lines.toLocaleString()} lines</span>}
+                        </button>
+                      );
+                    })}
                   </div>
                 );
               case 'steer':
@@ -392,6 +483,13 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
           <div ref={bottomRef} />
         </div>
       </div>
+      {preview && snap && (
+        <AttachmentViewer
+          sessionId={snap.sessionId}
+          name={preview}
+          onClose={() => setPreview(null)}
+        />
+      )}
       <div className="composer">
         <textarea
           value={text}

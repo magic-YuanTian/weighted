@@ -63,6 +63,13 @@ def workspace_digest(session):
     for name in files:
         lines.append(f"  {name} — {tools.word_count(session.workspace.read(name))} words")
 
+    att = session.attachments.meta()
+    if att:
+        lines.append("Attached by the user — read-only reference material, not part of")
+        lines.append("the deliverable and not seen by the checker. Use read_attachment:")
+        for a in att:
+            lines.append(f"  {a['name']} — {a['lines']} lines, {a['chars']} characters")
+
     seen = set()
     for req in R.active(session.requirements):
         scope = req.get("scope") or {}

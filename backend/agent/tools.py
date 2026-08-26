@@ -26,6 +26,25 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_attachment",
+            "description": ("Read a file the user attached (reference material — data "
+                            "tables, source documents). Attachments are read-only and are "
+                            "never part of the deliverable: the checker does not see them, "
+                            "so nothing you read here counts towards a word limit."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "e.g. sales_2023.csv"},
+                    "offset": {"type": "integer",
+                               "description": "character offset, for a file too large to read at once"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read a workspace file in full.",
             "parameters": {
@@ -129,6 +148,50 @@ class Workspace:
         return {f: self.read(f) for f in self.list()}
 
 
+class Attachments:
+    """Read-only reference material, deliberately not the workspace.
+
+    Kept in a separate directory because verifier.build_document() concatenates
+    every workspace file into the document that requirements are checked
+    against. A 19 KB data table living there would be counted by every global
+    length check and searched by every banned-phrase check. The agent can read
+    these; nothing else can see them."""
+
+    def __init__(self, root):
+        self.root = root
+        os.makedirs(root, exist_ok=True)
+
+    def path(self, name):
+        name = (name or "").strip().lstrip("./")
+        if not SAFE_NAME.match(name):
+            raise ValueError(f"invalid attachment name {name!r}")
+        return os.path.join(self.root, name)
+
+    def list(self):
+        return sorted(f for f in os.listdir(self.root)
+                      if os.path.isfile(os.path.join(self.root, f)))
+
+    def read(self, name):
+        p = self.path(name)
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+
+    def add(self, name, content):
+        with open(self.path(name), "w", encoding="utf-8") as fh:
+            fh.write(content)
+
+    def meta(self):
+        out = []
+        for f in self.list():
+            text = self.read(f) or ""
+            lines = text.count("\n") + 1 if text else 0
+            out.append({"name": f, "chars": len(text), "lines": lines,
+                        "preview": text[:400]})
+        return out
+
+
 def word_count(text):
     return len(re.findall(r"\S+", text or ""))
 
@@ -164,9 +227,32 @@ def execute(session, name, args):
         if name == "list_files":
             files = ws.list()
             if not files:
-                return "workspace is empty", {"ok": True, "kind": "read"}
+                att = session.attachments.list()
+                note = ("workspace is empty"
+                        + (" — attached (read-only): " + ", ".join(att) if att else ""))
+                return note, {"ok": True, "kind": "read"}
             lines = [f"{f}  ({word_count(ws.read(f))} words)" for f in files]
+            att = session.attachments.list()
+            if att:
+                lines.append("attached (read-only, not part of the deliverable): "
+                             + ", ".join(att))
             return "\n".join(lines), {"ok": True, "kind": "read"}
+
+        if name == "read_attachment":
+            att = session.attachments
+            wanted = args.get("name")
+            text = att.read(wanted)
+            if text is None:
+                have = ", ".join(att.list()) or "none"
+                return (f"no such attachment: {wanted}. Attached: {have}",
+                        {"ok": False, "kind": "read"})
+            offset = max(0, int(args.get("offset") or 0))
+            chunk = text[offset:offset + MAX_READ]
+            more = offset + len(chunk)
+            tail = ("" if more >= len(text) else
+                    f"\n\n[{more} of {len(text)} characters shown — "
+                    f"call read_attachment again with offset={more} for the rest]")
+            return chunk + tail, {"ok": True, "kind": "read", "path": wanted}
 
         if name == "read_file":
             text = ws.read(args.get("path"))
