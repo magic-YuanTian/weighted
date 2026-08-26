@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PILOT } from './pilot';
 import api from './api';
 
@@ -129,13 +129,24 @@ const PromptText = React.memo(function PromptText({ text, reqs, selected, onSele
 
 /* Clicking a file chip opens the attachment as the user would expect: the real
    contents, in a code face, scrollable. CSV gets light column alignment so a
-   data table is readable rather than a wall of commas. */
-function AttachmentViewer({ sessionId, name, onClose }) {
+   data table is readable rather than a wall of commas.
+
+   A page at a time, though: the whole table is what made the click feel slow.
+   The largest shipped file is 414 rows by 6 columns, and a run replaces the
+   snapshot on every step, so an open viewer reconciled all 2,500 cells again
+   each time. The agent still reads the file whole. */
+const PAGE = 120;
+
+const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name, onClose }) {
   const [text, setText] = useState(null);
   const [err, setErr] = useState('');
+  const [shown, setShown] = useState(PAGE);
 
   useEffect(() => {
     let live = true;
+    setText(null);
+    setErr('');
+    setShown(PAGE);
     api.attachment(sessionId, name)
       .then((d) => { if (live) setText(d.text); })
       .catch((e) => { if (live) setErr(e.message); });
@@ -148,9 +159,14 @@ function AttachmentViewer({ sessionId, name, onClose }) {
     return () => window.removeEventListener('keydown', esc);
   }, [onClose]);
 
-  const rows = (text || '').split('\n');
   const isCsv = /\.(csv|tsv)$/i.test(name);
-  const cells = isCsv ? rows.map((r) => r.split(',')) : null;
+  /* Parsed once per file, not once per parent render. */
+  const { rows, cells } = useMemo(() => {
+    const r = (text || '').split('\n');
+    return { rows: r, cells: isCsv ? r.map((line) => line.split(',')) : null };
+  }, [text, isCsv]);
+
+  const hidden = cells ? Math.max(0, cells.length - shown) : 0;
 
   return (
     <div className="sheet" role="dialog" aria-label={name} onClick={onClose}>
@@ -168,7 +184,7 @@ function AttachmentViewer({ sessionId, name, onClose }) {
           {text !== null && isCsv && (
             <table className="csv">
               <tbody>
-                {cells.slice(0, 500).map((row, i) => (
+                {cells.slice(0, shown).map((row, i) => (
                   <tr key={i} className={i === 0 ? 'hd' : ''}>
                     <td className="ln">{i === 0 ? '' : i}</td>
                     {row.map((c, j) => <td key={j}>{c}</td>)}
@@ -178,14 +194,20 @@ function AttachmentViewer({ sessionId, name, onClose }) {
             </table>
           )}
           {text !== null && !isCsv && <pre>{text}</pre>}
-          {text !== null && isCsv && cells.length > 500 && (
-            <p className="muted">…{(cells.length - 500).toLocaleString()} more rows. The agent reads the whole file.</p>
+          {hidden > 0 && (
+            <p className="muted">
+              {hidden.toLocaleString()} more rows not shown.{' '}
+              <button className="linkbtn" onClick={() => setShown((n) => n + PAGE * 4)}>
+                show more
+              </button>
+              {' '}The agent reads the whole file.
+            </p>
           )}
         </div>
       </div>
     </div>
   );
-}
+});
 
 
 export default function RunStream({ snap, focus, running, pending, busy, outbox, onRun, onPause,
@@ -197,6 +219,8 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
   const [tasks, setTasks] = useState([]);
   const [picked, setPicked] = useState('');
   const [preview, setPreview] = useState(null);
+  // stable, so React.memo on the viewer actually holds across step updates
+  const closePreview = useCallback(() => setPreview(null), []);
   const [hitStep, setHitStep] = useState(null);
   const scrollRef = useRef(null);
 
@@ -487,7 +511,7 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
         <AttachmentViewer
           sessionId={snap.sessionId}
           name={preview}
-          onClose={() => setPreview(null)}
+          onClose={closePreview}
         />
       )}
       <div className="composer">
