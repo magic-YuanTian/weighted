@@ -38,6 +38,71 @@ def _kin(a, b):
     return ta <= tb or tb <= ta
 
 
+# ---------------------------------------------------------------- code defs
+
+_CODE_EXT = re.compile(
+    r"\.(py|pyi|js|jsx|mjs|cjs|ts|tsx|java|kt|scala|go|rs|rb|php|swift|"
+    r"c|h|cc|cpp|hpp|cs|sh|sql|r|m)$", re.I)
+
+# A named definition, in the shape the languages this agent writes use.
+_DEF_RE = re.compile(
+    r"^(?P<indent>[ \t]*)"
+    r"(?:(?:export|default|public|private|protected|internal|static|final|"
+    r"abstract|async|open|override|suspend)\s+)*"
+    r"(?:def|class|function|interface|struct|enum|trait|impl|fn|func|type|sub)\s+"
+    r"(?P<name>[A-Za-z_]\w*)")
+
+# const foo = () => …, let bar = function …, var baz = async (…) => …
+_ASSIGN_DEF_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_]\w*)\s*=\s*"
+    r"(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_]\w*\s*=>)")
+
+_CLOSERS = {"}", "};", "}),", "});", ")", ");", "]", "end", "END"}
+
+
+def _indent(line):
+    return len(line[:len(line) - len(line.lstrip())].expandtabs(4))
+
+
+def _code_defs(text, files):
+    """Named definitions in code files, as (name, start, end) spans.
+
+    Without this, ``resolve_scope`` had two handles on a named thing — a
+    filename and a heading — and a function is neither. Every requirement
+    scoped to a function ("the function max_frequency_component returns a
+    float") resolved to None and sat at *unverified* for the whole run, even
+    though the function was sitting in the file the entire time.
+
+    The end of a span is found by indentation, which is exactly right for
+    Python and close enough for brace languages: the closing brace sits at the
+    definition's own indent, so it ends the span and is pulled back in.
+    """
+    out = []
+    for f in files:
+        if not _CODE_EXT.search(f["file"]):
+            continue
+        lines = text[f["start"]:f["end"]].split("\n")
+        starts, pos = [], 0
+        for line in lines:
+            starts.append(pos)
+            pos += len(line) + 1
+        for i, line in enumerate(lines):
+            m = _DEF_RE.match(line) or _ASSIGN_DEF_RE.match(line)
+            if not m:
+                continue
+            indent, last = _indent(m.group("indent") + "x"), len(lines) - 1
+            for j in range(i + 1, len(lines)):
+                if not lines[j].strip():
+                    continue
+                if _indent(lines[j]) <= indent:
+                    last = j if lines[j].strip() in _CLOSERS else j - 1
+                    break
+            out.append({"name": m.group("name"),
+                        "start": f["start"] + starts[i],
+                        "end": min(f["start"] + starts[last] + len(lines[last]), f["end"])})
+    return out
+
+
 # ---------------------------------------------------------------- document
 
 def build_document(workspace):
@@ -53,7 +118,9 @@ def build_document(workspace):
         pos += len(body) + 1
         text_parts.append("\n")
     text = "".join(text_parts)
-    return {"text": text, "files": ranges, "sections": checker.build_sections(text)}
+    return {"text": text, "files": ranges,
+            "sections": checker.build_sections(text),
+            "defs": _code_defs(text, ranges)}
 
 
 def locate(doc, start, end):
@@ -88,6 +155,12 @@ def resolve_scope(req, doc):
         for sec in doc["sections"]:
             if _slug(sec["name"]) == _slug(name):
                 return sec["start"], sec["end"]
+        # A function is neither a file nor a heading, so it gets its own
+        # exact pass before the fuzzy ones — a definition of precisely this
+        # name is as unambiguous a signal as a filename.
+        for d in doc.get("defs") or []:
+            if _slug(d["name"]) == _slug(name):
+                return d["start"], d["end"]
         near = [f for f in doc["files"] if _kin(name, stem(f["file"]))]
         if len(near) == 1:
             return near[0]["start"], near[0]["end"]
