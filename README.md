@@ -24,27 +24,37 @@ user always sees what is met, what is not, and which step made it so.
 
     backend/
       server.py        Flask entry point (static build + API)
-      llm_api.py       model access — implement this (see below)
+      llm_api.py       model access — the single place a model is wired in
       agent_routes.py  HTTP surface: /api/agent/*
       checker.py       deterministic text checks
+      setup_tasks.py   fetches the six benchmark tasks (see below)
       agent/           extraction, verification, tools, the step loop
+      tasks/           the fetched tasks and their data (git-ignored)
+      runs/            one directory per session: workspace, attachments,
+                       and the event log (git-ignored)
     frontend/
       src/agent/       the three-pane UI: chat, workspace, requirements
 
 ## Setup
 
-Backend (Python 3.10+):
+**Credentials.** Put your key in a `.env` at the repository root. It is
+git-ignored; keep it that way.
 
-    cd backend
-    pip install -r requirements.txt
-    python server.py            # serves on :5091
+    OPENAI_API_KEY=sk-...
 
-**Before the first run**, implement `client()` in `backend/llm_api.py` and set
-`MODEL`. The module docstring specifies the exact interface the rest of the
-code expects; any model client that satisfies it works. The model must support
-tool/function calling. Keep credentials out of the repository.
+`backend/llm_api.py` reads it from there and is the single place the model is
+wired in. It targets `gpt-5.6-luna` by default; override with `WEIGHTTEXT_MODEL`
+(and `OPENAI_BASE_URL` for an OpenAI-compatible gateway) rather than editing
+the file. Any client satisfying the interface in that module's docstring works,
+but **the model must support tool calling** — the agent has no other way to act.
 
-Frontend:
+**Backend** (Python 3.10+):
+
+    uv venv --python 3.12 .venv                      # or: python -m venv .venv
+    uv pip install --python .venv/bin/python -r backend/requirements.txt
+    cd backend && ../.venv/bin/python server.py      # serves on :5091
+
+**Frontend:**
 
     cd frontend
     npm install
@@ -52,9 +62,34 @@ Frontend:
 
 or `npm run build`, after which the backend serves the app on :5091 directly.
 
+### Benchmark tasks (optional)
+
+The composer offers a picker of six evaluation tasks — two each from CodeIF,
+T2R-bench and LongWeave. They are not in this repository: two of the three
+benchmarks ship without a licence file, so nothing is redistributed here.
+Fetch and assemble them once:
+
+    cd backend && ../.venv/bin/python setup_tasks.py
+
+This writes `backend/tasks/`, which is git-ignored. Instances are pinned by id,
+so re-running reproduces the same six tasks. Neither large source archive is
+downloaded whole — the T2R tables are ranged out of a 234 MB zip (~0.3 MB
+transferred) and the LongWeave file is streamed only as far as the rows needed
+(~159 MB of 224 MB).
+
+Skip this and the app still runs: `/api/agent/presets` returns an empty list
+and the picker hides itself. The backend reads the directory per request, so
+no restart is needed after running it — reload the page and the six tasks are
+there.
+
 ## Notes
 
 - Sessions are held in memory and written to `backend/runs/<id>/session.json`
   as a full event log (steps, verdicts, user actions) for later analysis.
 - `#dev` in the URL enables researcher tools: single-stepping, raw model
   observations, a context inspector, and session export.
+- Reference material (a data table, a source document) is attached rather than
+  pasted into the brief. Attachments live beside the workspace, not in it, so
+  the requirement checker never sees them — a table cannot be counted by a word
+  limit or searched by a banned-phrase rule. The agent reads them with
+  `read_attachment`; the chat shows a file chip that opens the contents.
