@@ -26,6 +26,15 @@ Rules of this workspace:
 - Every edit comes back with the checker's verdicts and a "blocking finish"
   line. When it says nothing is blocking, run_check once and then finish. Do
   not keep polishing a package that already passes.
+- Close the run with the finish tool, never with a message. A reply is not an
+  ending: it stops the run without closing it, and leaves the work sitting at
+  "in progress" with every requirement green. The one reason to reply instead
+  of acting is being genuinely stuck — a requirement you cannot satisfy, or a
+  decision only the user can make. Then say so in one sentence, and say what
+  you need.
+- The user reads your messages beside the workspace, with every file already
+  open in front of them. Never paste a file's contents into one, in whole or
+  in part. Say what you did, not what it says.
 """
 
 MAX_HISTORY_BLOCKS = 14
