@@ -17,7 +17,7 @@ JUDGE_MODEL = MODEL
 
 @retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(4),
        retry=retry_if_not_exception_type(NotImplementedError), reraise=True)
-def chat(messages, tools=None, temperature=0.3, model=None, max_tokens=1600):
+def chat(messages, tools=None, temperature=0.3, model=None, max_tokens=8000):
     """One completion. Returns the raw message object (may carry tool_calls)."""
     kwargs = {
         "model": model or MODEL,
@@ -35,7 +35,7 @@ def chat(messages, tools=None, temperature=0.3, model=None, max_tokens=1600):
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 
-def chat_json(messages, temperature=0, model=None, max_tokens=2000):
+def chat_json(messages, temperature=0, model=None, max_tokens=12000):
     """Completion parsed as JSON. Returns {} when the model returns junk —
     callers degrade gracefully rather than failing a turn."""
     msg = chat(messages, temperature=temperature, model=model,

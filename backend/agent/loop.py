@@ -257,13 +257,22 @@ def step(session):
 
     for call in calls:
         name = call.function.name
+        truncated = False
         try:
             args = __import__("json").loads(call.function.arguments or "{}")
         except ValueError:
-            args = {}
+            # A truncated tool call parses as nothing. Saying so beats handing
+            # the agent an empty-argument error it will misdiagnose.
+            args, truncated = {}, True
 
         session.step_count += 1
-        observation, meta = tools.execute(session, name, args)
+        if truncated:
+            observation = (f"{name} was cut off mid-call — its arguments did not "
+                           "parse. Nothing was written. Split the work into "
+                           "smaller edits and try again.")
+            meta = {"ok": False, "kind": "error", "blocked": "truncated"}
+        else:
+            observation, meta = tools.execute(session, name, args)
         gate_event = None
 
         if name == "finish":

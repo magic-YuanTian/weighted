@@ -95,8 +95,8 @@ def extract(brief):
                                                                   "unmapped": []}}
 
     data = llm.chat_json([{"role": "system", "content": SYSTEM},
-                          {"role": "user", "content": PROMPT.format(brief=brief[:8000])}],
-                         temperature=0, max_tokens=2600)
+                          {"role": "user", "content": PROMPT.format(brief=brief[:40000])}],
+                         temperature=0, max_tokens=12000)
 
     raw_reqs = data.get("requirements") if isinstance(data, dict) else None
     proposals = []
