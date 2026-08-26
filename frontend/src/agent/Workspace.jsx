@@ -242,7 +242,8 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
             {files.map((f) => (
               <div
                 key={f.path}
-                className={`sec ${scopes[f.path] ? `scope-${scopes[f.path]}` : ''}`}
+                className={`sec ${isCode(f.path) ? 'codesec' : ''} `
+                  + `${scopes[f.path] ? `scope-${scopes[f.path]}` : ''}`}
                 data-file={f.path}
               >
                 <h2>
