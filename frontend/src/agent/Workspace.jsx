@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 const words = (t) => (t || '').split(/\s+/).filter(Boolean).length;
+
+/* Prose gets the serif; a source file gets a code face. Getting this wrong
+   makes indentation invisible, which is most of what reading code is. */
+const CODE_EXT = /\.(py|js|jsx|ts|tsx|java|go|rb|rs|c|h|cpp|cc|hpp|cs|php|sh|sql|json|ya?ml|toml|ini|css|html?|xml|r|swift|kt|scala|pl|lua)$/i;
+const isCode = (path) => CODE_EXT.test(path || '');
 const PERSISTENT = new Set(['violated', 'partial', 'stale', 'frozen']);
 
 /* Decorations come straight from the reports' evidence. A violation stays
@@ -94,7 +99,7 @@ const FileText = React.memo(function FileText({ path, text, decorations, hitKey,
 
   return (
     <div
-      className="filetext"
+      className={`filetext ${isCode(path) ? 'code' : ''}`}
       contentEditable
       suppressContentEditableWarning
       spellCheck={false}
@@ -242,7 +247,11 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
               >
                 <h2>
                   {f.path}
-                  <span className="count">{words(f.text)} words</span>
+                  <span className="count">
+                    {isCode(f.path)
+                      ? `${(f.text || '').split('\n').length} lines`
+                      : `${words(f.text)} words`}
+                  </span>
                 </h2>
                 <FileText
                   path={f.path}
