@@ -79,6 +79,7 @@
 /* ---------------- run stream ---------------- */
 .wt4 .stream { padding:14px 12px 16px; display:flex; flex-direction:column; gap:6px;
                min-width:0; overflow-wrap:anywhere; }
+.wt4 .stream > * { min-width:0; max-width:100%; }
 .wt4 .turn { border:1px solid var(--line); background:rgba(71,68,214,.04); border-radius:5px; padding:8px 10px; font-size:13px;
              white-space:pre-wrap; overflow-wrap:anywhere; }
 /* the label is markup, not part of the pasted brief — keep it collapsing */
@@ -91,12 +92,17 @@
 }
 .wt4 .turn .who { font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--accent); margin-bottom:3px; }
 .wt4 .step { border:1px solid transparent; border-radius:5px; }
-.wt4 .step > .row { width:100%; display:flex; align-items:center; gap:8px; padding:5px 8px; text-align:left; border-radius:5px; font-size:13px; color:var(--ink-2); cursor:pointer; }
+.wt4 .step > .row { width:100%; display:flex; align-items:center; gap:4px 8px; padding:5px 8px; text-align:left; border-radius:5px; font-size:13px; color:var(--ink-2); cursor:pointer;
+                    flex-wrap:wrap; min-width:0; }
 .wt4 .step > .row:hover { background:var(--surface-2); }
 .wt4 .step .id { color:var(--ink-3); font-variant-numeric:tabular-nums; flex:none; font-weight:600; }
 .wt4 .step .act { color:var(--ink); font-weight:500; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.wt4 .step .arg { color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.wt4 .step .tail { margin-left:auto; display:flex; gap:5px; align-items:center; flex:none; }
+.wt4 .step .arg { color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+/* one step can settle a dozen requirements. The chip row must be allowed to
+   wrap and to shrink, or its intrinsic width pushes the whole step past the
+   column edge. */
+.wt4 .step .tail { margin-left:auto; display:flex; gap:4px 5px; align-items:center;
+                   flex:0 1 auto; min-width:0; flex-wrap:wrap; justify-content:flex-end; }
 .wt4 .step .add { color:var(--ok); } .wt4 .step .del { color:var(--bad); }
 .wt4 .step .caret { color:var(--ink-3); width:9px; flex:none; transition:transform .15s; }
 .wt4 .step.open .caret { transform:rotate(90deg); }
