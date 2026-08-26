@@ -223,6 +223,27 @@ JUDGE_SYSTEM = ("You are a strict, skeptical reviewer. You judge only what the t
                 "Never praise, never soften.")
 
 
+def _judge_view(doc):
+    """The document as the judge has to see it: each body under its filename.
+
+    build_document() concatenates bodies only — the names are kept in
+    doc["files"] for evidence mapping and never reach the text. A judge asked
+    whether the deliverable is "a file named report.md" therefore has nothing
+    to go on, and under the skeptical system prompt answers "violated" for a
+    file that is sitting right there. The offsets in doc["text"] are load
+    bearing (scope resolution, scope hashes, quote lookup), so this is a
+    separate rendering used for the prompt alone.
+    """
+    if not doc["files"]:
+        return doc["text"]
+    parts = []
+    for f in doc["files"]:
+        body = doc["text"][f["start"]:f["end"]]
+        words = len(re.findall(r"\S+", body))
+        parts.append(f"=== file: {f['file']} ({words} words) ===\n{body}")
+    return "\n".join(parts)
+
+
 def judge(reqs, doc, task_brief=""):
     """One batched call for every judge-verified requirement. Returns
     {id: (verdict, detail, quote, confidence)}."""
@@ -233,7 +254,9 @@ def judge(reqs, doc, task_brief=""):
     lines = []
     if task_brief:
         lines += [f"Task brief: {task_brief}", ""]
-    lines += ["Document under review:", "---", doc["text"][:12000], "---", "",
+    lines += ["Document under review. Each file appears under a '=== file: NAME ==='",
+              "header; the headers are metadata, not part of the text.",
+              "---", _judge_view(doc)[:12000], "---", "",
               "Judge each requirement:"]
     for r in targets:
         scope = r.get("scope") or {}
