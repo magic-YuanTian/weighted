@@ -192,6 +192,42 @@ class Attachments:
         return out
 
 
+def _nearest(haystack, needle, window=320):
+    """The passage in the file most like the one the agent asked for.
+
+    A bare "not found" sends the agent back to re-read and guess again, which
+    it does badly: it re-reads and then submits the same invented anchor. What
+    it needs is the text that is actually there, so it can copy it.
+    """
+    m = difflib.SequenceMatcher(None, haystack, needle, autojunk=False)
+    match = m.find_longest_match(0, len(haystack), 0, len(needle))
+    if match.size < 12:
+        head = "\n".join(haystack.split("\n")[:8])
+        return ("Nothing in the file resembles it. The file begins:\n"
+                f"---\n{head[:window]}\n---\n"
+                "Copy an exact passage from the file, or use write_file.")
+    start = max(0, match.a - 40)
+    end = min(len(haystack), match.a + match.size + 40)
+    return ("The closest passage actually in the file is:\n"
+            f"---\n{haystack[start:end][:window]}\n---\n"
+            "Copy it exactly, including punctuation and any curly quotes.")
+
+
+def _occurrences(haystack, needle, limit=4, context=60):
+    """Each place the ambiguous anchor matched, with its surroundings."""
+    out, start, n = [], 0, 0
+    while n < limit:
+        i = haystack.find(needle, start)
+        if i < 0:
+            break
+        a = max(0, i - context)
+        b = min(len(haystack), i + len(needle) + context)
+        out.append(f"  {n + 1}. …{haystack[a:b]}…".replace("\n", " "))
+        start = i + 1
+        n += 1
+    return "\n".join(out)
+
+
 def word_count(text):
     return len(re.findall(r"\S+", text or ""))
 
@@ -272,11 +308,13 @@ def execute(session, name, args):
                 if not old:
                     return "edit_file needs a non-empty old_str", {"ok": False, "kind": "edit", "path": path}
                 if hits == 0:
-                    return (f"old_str not found in {path} — read the file again and copy the "
-                            "passage exactly", {"ok": False, "kind": "edit", "path": path})
+                    return (f"old_str not found in {path}.\n{_nearest(before, old)}",
+                            {"ok": False, "kind": "edit", "path": path})
                 if hits > 1:
-                    return (f"old_str occurs {hits} times in {path} — include more surrounding "
-                            "text so it is unique", {"ok": False, "kind": "edit", "path": path})
+                    return (f"old_str occurs {hits} times in {path}. "
+                            f"Extend it so it is unique — the occurrences are:\n"
+                            + _occurrences(before, old),
+                            {"ok": False, "kind": "edit", "path": path})
                 after = before.replace(old, new, 1)
 
             lost = _tier0_violations(session, before, after)
