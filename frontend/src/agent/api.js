@@ -50,6 +50,7 @@ export const api = {
   requirement: (sessionId, payload) => post('/requirement', { sessionId, ...payload }),
   recheck: (sessionId, judge) => post('/recheck', { sessionId, judge }),
   context: (sessionId) => get('/context', { sessionId }),
+  presets: () => get('/presets'),
   telemetry: (sessionId, action, payload) =>
     post('/telemetry', { sessionId, action, payload }).catch(() => {}),
   exportUrl: (sessionId) => `${BASE}/export?sessionId=${sessionId}`,

@@ -5,6 +5,8 @@ in a single `snapshot`, so the client never has to reconstruct state from a
 stream of patches.
 """
 
+import json
+import os
 import traceback
 
 from flask import Blueprint, jsonify, request
@@ -37,6 +39,31 @@ def _missing(e):
 
 
 # ------------------------------------------------------------------ session
+
+TASKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
+
+
+@bp.route("/presets", methods=["GET"])
+def presets():
+    """The benchmark tasks, ready to load into the brief box. Absent when the
+    tasks directory has not been populated — the UI just hides the picker."""
+    try:
+        manifest = os.path.join(TASKS_DIR, "manifest.json")
+        if not os.path.exists(manifest):
+            return jsonify({"tasks": []})
+        with open(manifest, encoding="utf-8") as fh:
+            tasks = json.load(fh)
+        out = []
+        for t in tasks:
+            path = os.path.join(TASKS_DIR, f"{t['id']}.txt")
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                out.append({**t, "brief": fh.read()})
+        return jsonify({"tasks": sorted(out, key=lambda t: t.get("n", 0))})
+    except Exception as e:                                    # noqa: BLE001
+        return _fail(e)
+
 
 @bp.route("/session", methods=["POST"])
 def create_session():

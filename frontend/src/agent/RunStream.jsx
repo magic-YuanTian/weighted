@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { PILOT } from './pilot';
+import api from './api';
 
 const DEV = window.location.hash.includes('dev');
 
@@ -130,8 +131,18 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                                     onSend, onAnswer, onSelectReq, onJump, selected }) {
   const [openSteps, setOpenSteps] = useState(() => new Set());
   const [text, setText] = useState('');
+  // The benchmark tasks are served from disk, not bundled: several ship
+  // without a licence and stay out of the repo. No tasks, no picker.
+  const [tasks, setTasks] = useState([]);
+  const [picked, setPicked] = useState('');
   const [hitStep, setHitStep] = useState(null);
   const scrollRef = useRef(null);
+
+  useEffect(() => {
+    let live = true;
+    api.presets().then((d) => { if (live) setTasks(d.tasks || []); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
   const bottomRef = useRef(null);
   const events = (snap && snap.events) || [];
 
@@ -198,7 +209,38 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
             <div className="kickoff">
               <span>Describe the task. The agent starts working on it, and the
                 requirements it must meet appear on the right.</span>
-              <button className="linkbtn" onClick={() => setText(PILOT)}>
+              {tasks.length > 0 && (
+                <div className="taskpicker">
+                  <label htmlFor="taskpick">Benchmark task</label>
+                  <select
+                    id="taskpick"
+                    value={picked}
+                    onChange={(e) => {
+                      const t = tasks.find((x) => x.id === e.target.value);
+                      setPicked(e.target.value);
+                      if (t) setText(t.brief);
+                    }}
+                  >
+                    <option value="">Choose one, or describe your own…</option>
+                    {tasks.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {`Task ${t.n} · ${t.domain} · ${t.label}`}
+                      </option>
+                    ))}
+                  </select>
+                  {picked && (() => {
+                    const t = tasks.find((x) => x.id === picked);
+                    return t ? (
+                      <p className="taskmeta">
+                        <span>{t.source}</span>
+                        <span>{t.words.toLocaleString()} words</span>
+                        <em>{t.note}</em>
+                      </p>
+                    ) : null;
+                  })()}
+                </div>
+              )}
+              <button className="linkbtn" onClick={() => { setText(PILOT); setPicked(''); }}>
                 load an example task
               </button>
             </div>
@@ -354,7 +396,7 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
         <textarea
           value={text}
           placeholder="Describe the task, or ask for a change…"
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => { setText(e.target.value); setPicked(''); }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
           }}
