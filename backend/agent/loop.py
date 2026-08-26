@@ -245,6 +245,27 @@ def step(session):
     thought = (msg.content or "").strip()
     calls = list(msg.tool_calls or [])
 
+    if not calls and not thought:
+        # Neither a call nor a word. This is not the agent talking to the user,
+        # and it happens most often once every requirement is satisfied and the
+        # model has nothing left to say. Logged as speech it renders an empty
+        # bubble in the chat, and pressing continue only adds another one --
+        # the prompt is unchanged, so the next turn comes back just as empty.
+        # Name it for what it is, and give the next turn something to answer.
+        session.llm_messages.append({
+            "role": "user",
+            "content": ("That turn was empty: no tool call and no message. If "
+                        "the work is complete, call finish. Otherwise take the "
+                        "next concrete action."),
+        })
+        session.status = "idle"
+        session.log("notice",
+                    text=("The agent returned an empty turn — nothing to do and "
+                          "nothing to say. Continue asks it again; if everything "
+                          "is satisfied, it should finish."))
+        session.save()
+        return session.events[start_index:]
+
     if not calls:
         # No action: the agent is talking to the user. That ends the run and
         # hands control back — it is not a failure.

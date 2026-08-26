@@ -447,7 +447,12 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
               case 'error':
                 return <div className="notice" data-kind="error" key={ev.i}>{ev.text}</div>;
               case 'assistant':
-                return <div className="assistant" key={ev.i}>{ev.text}</div>;
+                // A turn with no text is not speech. The backend no longer
+                // records one, but old runs replayed from disk still hold them
+                // and an empty bubble is worse than no bubble.
+                return ev.text
+                  ? <div className="assistant" key={ev.i}>{ev.text}</div>
+                  : null;
               case 'commit':
                 return (
                   <div className="inject" key={ev.i}>
