@@ -38,6 +38,23 @@ LONGWEAVE_URL = ("https://huggingface.co/datasets/zikaixiao1/LongWeave/"
 
 # The exact instances. Pinned by id so a re-run reproduces the same six tasks.
 CODEIF_IDS = [367, 738]
+
+# CodeIF's instruction lists are generated, and question 367's came out
+# self-defeating: two blanket naming conventions that the same list's explicit
+# names cannot obey, and a call into a Flask function that does not exist. A run
+# cannot pass them, and an agent that tries breaks the requirement it was
+# obeying a moment ago -- in the pilot it renamed MsgProduct to MSG_PRODUCT to
+# satisfy #14 and thereby failed #13. Nothing is rewritten; these are dropped
+# whole, keyed by their 1-based position upstream, and the manifest records it.
+CODEIF_DROP = {
+    367: {
+        11: "requires CAPITALIZED_WITH_UNDERSCORES function names, which #10's "
+            "sort_event cannot have",
+        14: "requires CAPITALIZED_WITH_UNDERSCORES class names, which #13's "
+            "MsgProduct cannot have",
+        16: "requires sort_event from Flask; Flask has no such function",
+    },
+}
 T2R_TABLES = ["metainputs_transmission_distribution",
               "2020_MTA_Metro_North_On_Time_Performance_Data"]
 T2R_KEYPOINTS = [6, 10]          # which query to take for each table
@@ -116,16 +133,23 @@ def build_codeif(meta, briefs):
         r = rows.get(qid)
         if r is None:
             raise RuntimeError(f"CodeIF question_id {qid} not found upstream")
-        ins = "\n".join(f"{i+1}. {x['instruction']}"
-                        for i, x in enumerate(r["instruction_list"]))
+        drop = CODEIF_DROP.get(qid, {})
+        kept = [x for i, x in enumerate(r["instruction_list"], start=1)
+                if i not in drop]
+        ins = "\n".join(f"{i+1}. {x['instruction']}" for i, x in enumerate(kept))
+        for i in sorted(drop):
+            log(f"            dropped #{i}: {drop[i]}")
         briefs[f"codeif_{qid}"] = (r["question"].strip() + "\n\nRequirements:\n" + ins
                                    + "\n\nWrite the solution to solution.py.")
         first = n == 1
         meta.append(dict(
             id=f"codeif_{qid}", n=n, domain="Code generation", benchmark="CodeIF",
-            label=(f"CodeIF {n} — sentiment app, {len(r['instruction_list'])} constraints"
+            label=(f"CodeIF {n} — sentiment app, {len(kept)} constraints"
                    if first else
-                   f"CodeIF {n} — frequency analysis, {len(r['instruction_list'])} constraints"),
+                   f"CodeIF {n} — frequency analysis, {len(kept)} constraints"),
+            dropped=[{"index": i, "reason": drop[i],
+                      "instruction": r["instruction_list"][i - 1]["instruction"]}
+                     for i in sorted(drop)],
             source=f"CodeIF (ACL 2025 Industry) question_id {qid}, "
                    f"{r['meta_info']['item_set']} split, Python",
             note=("No for-loop but a while-loop is required, at most 2 classes, no "
@@ -133,8 +157,8 @@ def build_codeif(meta, briefs):
                   "Same constraint count as the other CodeIF task but from a different "
                   "shipped split, so the pair separates difficulty from constraint count."),
             tested=first))
-        log(f"            task {n}: question_id {qid}, "
-            f"{len(r['instruction_list'])} constraints")
+        log(f"            task {n}: question_id {qid}, {len(kept)} constraints"
+            + (f" ({len(drop)} dropped as unsatisfiable)" if drop else ""))
 
 
 T2R_BRIEF = """{query}
