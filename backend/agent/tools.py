@@ -46,10 +46,20 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a workspace file in full.",
+            "description": ("Read a workspace file. Lines come back numbered, so an "
+                            "anchor for edit_file can be copied rather than recalled, "
+                            "and insert_line can name a real place."),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "e.g. cover_letter.md"}},
+                "properties": {
+                    "path": {"type": "string", "description": "e.g. cover_letter.md"},
+                    "view_range": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": ("optional [start, end], 1-indexed; end -1 reads "
+                                        "to the last line"),
+                    },
+                },
                 "required": ["path"],
             },
         },
@@ -84,6 +94,27 @@ TOOL_SCHEMAS = [
                     "new_str": {"type": "string"},
                 },
                 "required": ["path", "old_str", "new_str"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "insert_file",
+            "description": ("Insert text into a file at a line, without touching what is "
+                            "already there. This is how you add: edit_file only replaces."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "insert_line": {
+                        "type": "integer",
+                        "description": ("the line number to insert AFTER; 0 puts the text "
+                                        "at the top, the last line number appends"),
+                    },
+                    "insert_text": {"type": "string"},
+                },
+                "required": ["path", "insert_line", "insert_text"],
             },
         },
     },
@@ -192,6 +223,26 @@ class Attachments:
         return out
 
 
+def _lines(text):
+    """A file's lines, and whether it ended with a newline. Splitting on "\n"
+    leaves a phantom empty last line for every well-formed file; numbering it
+    invites an insert after a line that is not there."""
+    lines = (text or "").split("\n")
+    trailing = bool(lines) and lines[-1] == ""
+    return (lines[:-1] if trailing else lines), trailing
+
+
+def _numbered(lines, first=1):
+    """Lines with their numbers, the way the Anthropic text editor tool returns
+    a view. They do two jobs: insert_line has something real to name, and an
+    edit anchor gets copied off a listing instead of recalled from memory --
+    which is where most failed edits came from."""
+    if not lines:
+        return "(empty file)"
+    width = len(str(first + len(lines) - 1))
+    return "\n".join(f"{first + i:>{width}}: {line}" for i, line in enumerate(lines))
+
+
 def _nearest(haystack, needle, window=320):
     """The passage in the file most like the one the agent asked for.
 
@@ -291,22 +342,63 @@ def execute(session, name, args):
             return chunk + tail, {"ok": True, "kind": "read", "path": wanted}
 
         if name == "read_file":
-            text = ws.read(args.get("path"))
+            path = args.get("path")
+            text = ws.read(path)
             if text is None:
-                return (f"no such file: {args.get('path')}. Files: {', '.join(ws.list()) or 'none'}",
+                return (f"no such file: {path}. Files: {', '.join(ws.list()) or 'none'}",
                         {"ok": False, "kind": "read"})
-            return text[:MAX_READ], {"ok": True, "kind": "read", "path": args.get("path")}
+            lines, _ = _lines(text)
+            first, rng = 1, args.get("view_range")
+            if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                try:
+                    a, b = int(rng[0]), int(rng[1])
+                except (TypeError, ValueError):
+                    return (f"view_range must be two integers, got {rng!r}.",
+                            {"ok": False, "kind": "read", "path": path})
+                first = max(1, a)
+                last = len(lines) if b == -1 else min(len(lines), b)
+                if first > len(lines):
+                    return (f"view_range starts at {first} but {path} has "
+                            f"{len(lines)} lines.",
+                            {"ok": False, "kind": "read", "path": path})
+                lines = lines[first - 1:last]
+            return _numbered(lines, first)[:MAX_READ], {"ok": True, "kind": "read",
+                                                        "path": path}
 
-        if name in ("write_file", "edit_file"):
+        if name in ("write_file", "edit_file", "insert_file"):
             path = args.get("path")
             before = ws.read(path) or ""
             if name == "write_file":
                 after = args.get("content") or ""
+            elif name == "insert_file":
+                if ws.read(path) is None:
+                    return (f"no such file: {path}. Files: {', '.join(ws.list()) or 'none'}. "
+                            "Use write_file to create it.",
+                            {"ok": False, "kind": "edit", "path": path})
+                lines, trailing = _lines(before)
+                try:
+                    at = int(args.get("insert_line"))
+                except (TypeError, ValueError):
+                    return (f"insert_file needs insert_line, the line number to insert "
+                            f"after. 0 puts the text at the top; {len(lines)} appends. "
+                            f"{path} has {len(lines)} lines.",
+                            {"ok": False, "kind": "edit", "path": path})
+                if not 0 <= at <= len(lines):
+                    return (f"insert_line {at} is outside {path}, which has "
+                            f"{len(lines)} lines. Use 0 for the top and {len(lines)} "
+                            "to append.",
+                            {"ok": False, "kind": "edit", "path": path})
+                added, _ = _lines(args.get("insert_text") or "")
+                after = "\n".join(lines[:at] + added + lines[at:]) + ("\n" if trailing else "")
             else:
                 old, new = args.get("old_str") or "", args.get("new_str") or ""
                 hits = before.count(old)
                 if not old:
-                    return "edit_file needs a non-empty old_str", {"ok": False, "kind": "edit", "path": path}
+                    n = len(_lines(before)[0])
+                    return ("edit_file replaces text; it cannot add any, so old_str "
+                            f"cannot be empty. To add text use insert_file: insert_line=0 "
+                            f"for the top of {path}, {n} to append at the end.",
+                            {"ok": False, "kind": "edit", "path": path})
                 if hits == 0:
                     return (f"old_str not found in {path}.\n{_nearest(before, old)}",
                             {"ok": False, "kind": "edit", "path": path})

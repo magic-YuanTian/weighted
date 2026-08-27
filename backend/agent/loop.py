@@ -17,8 +17,14 @@ Rules of this workspace:
 - Exactly one file per deliverable, named after it (cover_letter.md,
   recruiter_email.md). Start each file with a '# Title' heading line. Never keep
   the same content in two files — a duplicate makes every check ambiguous.
-- Prefer edit_file over write_file when revising: it cannot disturb text you
-  did not name.
+- Three ways to change a file, and they do different jobs. edit_file replaces
+  one exact passage and cannot add anything. insert_file adds text at a line
+  without touching what is there — insert_line 0 for the top, the last line
+  number to append. write_file replaces the whole file, so reach for it last.
+  Needing more words is a job for insert_file, never for an empty old_str.
+- read_file numbers the lines it returns. Copy an anchor for edit_file out of
+  that listing rather than from memory, and strip the "12: " prefix — the
+  numbers are the listing's, not the file's.
 - run_check runs a deterministic checker. It is free and it does not flatter
   you. Run it after a substantive edit and before you try to finish.
 - Take exactly one action at a time and say, in one short sentence, why.
@@ -141,7 +147,7 @@ def context_preview(session):
 
 
 def _arg_summary(name, args):
-    if name in ("read_file", "write_file", "edit_file"):
+    if name in ("read_file", "write_file", "edit_file", "insert_file"):
         return args.get("path") or ""
     if name == "finish":
         return (args.get("summary") or "")[:80]
@@ -167,7 +173,7 @@ def _summarize_step(session, name, args, meta, changed):
     if meta.get("blocked") == "tier0":
         return "The change would have removed frozen text, so the file was left as it was."
     if not meta.get("ok"):
-        if name in ("write_file", "edit_file"):
+        if name in ("write_file", "edit_file", "insert_file"):
             return "The change didn't match the current text, so nothing was changed."
         return ""
     if name == "run_check":
@@ -180,7 +186,7 @@ def _summarize_step(session, name, args, meta, changed):
             if r.get("status") == "active" and rep.get("verdict") == "violated":
                 lines.append(f"{r['id']}: {_plain_detail(r)}")
         return "\n".join(lines)
-    if name in ("write_file", "edit_file"):
+    if name in ("write_file", "edit_file", "insert_file"):
         lines = []
         for chg in changed:
             req = by_id.get(chg["id"])

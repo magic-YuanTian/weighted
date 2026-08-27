@@ -19,13 +19,15 @@ function describeStep(ev) {
   if (meta.blocked === 'gate') return 'Tried to finish, but not everything is met yet';
   if (meta.blocked === 'tier0') return 'An edit tried to change locked text and was rejected';
   if (meta.ok === false) {
-    if (ev.action === 'edit_file' || ev.action === 'write_file') return `An edit to ${f} didn't apply`;
+    if (ev.action === 'edit_file' || ev.action === 'write_file'
+        || ev.action === 'insert_file') return `An edit to ${f} didn't apply`;
     if (ev.action === 'read_file') return `Couldn't find ${f}`;
     return 'Something went wrong';
   }
   switch (ev.action) {
     case 'write_file': return `Wrote ${f}`;
     case 'edit_file': return `Revised ${f}`;
+    case 'insert_file': return `Added to ${f}`;
     case 'read_file': return `Read ${f}`;
     case 'list_files': return 'Looked over the files';
     case 'run_check': {
