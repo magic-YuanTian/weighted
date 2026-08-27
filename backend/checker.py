@@ -141,6 +141,33 @@ def _check_lexical_require(constraint, scope_text, base):
     return "satisfied", "all required phrases present", locations
 
 
+# A pattern written from a brief and the document that must match it differ in
+# two predictable ways, and neither is the agent disobeying. A title in a
+# markdown file wears a '#' -- the agent prompt mandates one -- and a headline
+# drops the sentence period the brief happened to quote the title with. Both
+# relaxations apply only after the pattern as written has already failed, and
+# the verdict says which one was needed.
+_ANCHOR = re.compile(r"(?<!\\)\^")
+# Substituted for a leading ^ (a re.sub replacement, hence the doubling).
+_HEAD_OPT = r"^(?:#{1,6}\\s*|\\*\\*)?"
+# Concatenated onto the pattern, so these are the literal regexes.
+_TAIL_AFTER_DOT = r"\.?(?:\*\*)?$"
+_TAIL_PLAIN = r"(?:\*\*)?$"
+
+
+def _relax(pattern):
+    """The pattern with the decoration a document adds allowed -- a '#' or '**'
+    on the heading, a closing period the headline drops -- or None when there
+    is nothing to loosen. Tried only after the pattern as written has failed.
+    """
+    out = _ANCHOR.sub(_HEAD_OPT, pattern, count=1)
+    if pattern.endswith(r"\.$"):
+        out = out[:-len(r"\.$")] + _TAIL_AFTER_DOT
+    elif pattern.endswith("$") and not pattern.endswith(r"\$"):
+        out = out[:-1] + _TAIL_PLAIN
+    return out if out != pattern else None
+
+
 def _check_structure(constraint, scope_text, base):
     params = constraint.get("params") or {}
     pattern = params.get("pattern")
@@ -148,14 +175,33 @@ def _check_structure(constraint, scope_text, base):
         pattern = r"(?mi)^\s*subject\s*:"
     if not pattern:
         return "unchecked", "no pattern specified", []
-    try:
-        m = re.search(pattern, scope_text)
-    except re.error as e:
-        return "unchecked", f"bad pattern: {e}", []
+
+    def hit(pat):
+        # MULTILINE always: ^ and $ in a requirement mean a line. Anchored to
+        # the whole scope they can only match a document that is nothing but
+        # the title, which is never what a brief asks for.
+        try:
+            return re.search(pat, scope_text, re.MULTILINE), None
+        except re.error as e:
+            return None, f"bad pattern: {e}"
+
+    m, err = hit(pattern)
+    if err:
+        return "unchecked", err, []
     if m:
         return ("satisfied", "pattern present",
                 [{"start": base + m.start(), "end": base + m.end(),
                   "text": m.group(0)}])
+
+    relaxed = _relax(pattern)
+    if relaxed:
+        m, err = hit(relaxed)
+        if m and not err:
+            return ("satisfied",
+                    "pattern present, allowing the heading markers and closing "
+                    "period a document adds",
+                    [{"start": base + m.start(), "end": base + m.end(),
+                      "text": m.group(0)}])
     return "violated", f"pattern not found: {pattern}", []
 
 

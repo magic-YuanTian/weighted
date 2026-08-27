@@ -171,6 +171,44 @@ def resolve_scope(req, doc):
     return 0, len(doc["text"])
 
 
+_FILENAME = re.compile(
+    r"\b([\w-]+\.(?:md|markdown|txt|py|csv|tsv|json|ya?ml|html?|jsx?|tsx?|sh|sql))\b",
+    re.I)
+_DELIVERS = re.compile(
+    r"\b(?:writ|sav|deliver|output|produc|creat|nam|call|provid|submit|export|put|"
+    r"stor|plac)\w*\b", re.I)
+
+
+def _delivery(req, doc):
+    """(verdict, detail, filename) for "put the deliverable in a file called X",
+    or None when the requirement is not that.
+
+    Whether a file exists under a given name is a fact about the workspace, and
+    nothing in a document's prose can settle it. Sent to the judge it produced
+    the worst kind of false negative -- report.md sitting in the workspace,
+    judged "the text does not demonstrate that the report was written to a file
+    named report.md". Naming the files in the judge's view stopped that in
+    practice, but the routing is still wrong: this belongs to code.
+
+    Deliberately narrow. One filename, a delivery verb, and a short sentence --
+    a longer one is making a claim about the contents too, and that part is
+    still the judge's.
+    """
+    text = (req.get("text") or "").strip()
+    names = set(n.lower() for n in _FILENAME.findall(text))
+    if len(names) != 1 or not _DELIVERS.search(text) or len(text.split()) > 14:
+        return None
+    want = names.pop()
+    have = [f["file"] for f in doc["files"]]
+    for f in have:
+        if f.lower() == want:
+            return "satisfied", f"{f} is in the workspace", f
+    return ("violated",
+            f"no file named {want} in the workspace"
+            + (f" — there is {', '.join(have)}" if have else ", which is empty"),
+            None)
+
+
 def _hash(text):
     return hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]
 
@@ -293,6 +331,11 @@ def _check_rule(req, session):
 
 JUDGE_SYSTEM = ("You are a strict, skeptical reviewer. You judge only what the text "
                 "shows. When in doubt you answer \"violated\" and say what is missing. "
+                "One exception, and only this one: a rule about how to handle "
+                "something the document never does — capitalise brand names where "
+                "no brand name appears, keep tables consistent where there are no "
+                "tables — is \"satisfied\". There is nothing there to get wrong, and "
+                "the absence of the occasion is not the absence of compliance. "
                 "Never praise, never soften.")
 
 
@@ -408,6 +451,20 @@ def verify(session, judge_pass=False, **kw):
             verdict, detail, evidence = _check_rule(req, session)
             reports.append({"id": req["id"], "verdict": verdict, "detail": detail,
                             "evidence": evidence, "checkedAtStep": step_no,
+                            "confidence": None, "scopeHash": None})
+            continue
+
+        deliver = _delivery(req, doc)
+        if deliver:
+            verdict, detail, fname = deliver
+            ev = []
+            for f in doc["files"]:
+                if f["file"] == fname:
+                    ev = [{"kind": "artifact", "file": f["file"], "start": 0,
+                           "end": min(120, f["end"] - f["start"]),
+                           "quote": doc["text"][f["start"]:f["start"] + 120]}]
+            reports.append({"id": req["id"], "verdict": verdict, "detail": detail,
+                            "evidence": ev, "checkedAtStep": step_no,
                             "confidence": None, "scopeHash": None})
             continue
 
