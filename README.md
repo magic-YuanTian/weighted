@@ -62,6 +62,41 @@ but **the model must support tool calling** — the agent has no other way to ac
 
 or `npm run build`, after which the backend serves the app on :5091 directly.
 
+### Sharing it with other people
+
+`server.py` serves the built frontend and the API from one port, so a single
+process is the whole app. What it does not have is accounts: every run is a
+long chain of large model calls billed to whoever owns `OPENAI_API_KEY`. Set a
+shared password before the app is reachable from anywhere but this machine.
+
+    export WEIGHTTEXT_PASSWORD='something-only-they-know'
+    cd backend && ../.venv/bin/python server.py
+
+Unset, there is no gate — local development behaves as it always did. Set, the
+whole app answers 401 until the browser sends the password, over HTTP Basic,
+so there is nothing to log into and no session to leak. Anyone with the
+password can spend the key, so treat it as a key.
+
+On the same network that is already enough: the server binds `0.0.0.0`, so
+others reach it at `http://<your-ip>:5091`. Leaving that network is the access
+control.
+
+For a link that works anywhere, put a tunnel in front of it rather than
+opening a port on your router. The tunnel supplies HTTPS, which Basic auth
+needs to not be sent in the clear:
+
+    brew install cloudflared
+    cloudflared tunnel --url http://localhost:5091
+
+It prints a `https://<random>.trycloudflare.com` address. Send that and the
+password. Stopping the tunnel withdraws the link immediately.
+
+Two things this setup is not built for. Sessions live in `backend/runs/` on
+local disk, so everyone shares one server and the work does not survive a
+machine that goes to sleep. And a password shared among a few people is not a
+substitute for per-user keys — for anything genuinely public, users need to
+supply their own credentials and the API needs a rate limit.
+
 ### Benchmark tasks (optional)
 
 The composer offers a picker of six evaluation tasks — two each from CodeIF,
