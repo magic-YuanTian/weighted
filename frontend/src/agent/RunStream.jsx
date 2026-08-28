@@ -149,14 +149,63 @@ const PromptText = React.memo(function PromptText({ text, reqs, selected, onSele
 });
 
 /* Clicking a file chip opens the attachment as the user would expect: the real
-   contents, in a code face, scrollable. CSV gets light column alignment so a
-   data table is readable rather than a wall of commas.
+   contents, in a code face, scrollable. A CSV is a table, so it is rendered as
+   one — the alternative is a wall of commas nobody can read a column out of.
 
    A page at a time, though: the whole table is what made the click feel slow.
    The largest shipped file is 414 rows by 6 columns, and a run replaces the
    snapshot on every step, so an open viewer reconciled all 2,500 cells again
    each time. The agent still reads the file whole. */
 const PAGE = 120;
+
+/* RFC 4180, not split(','). A quoted field keeps its commas and its newlines
+   and "" is one literal quote; splitting on every comma shifts every column to
+   the right of the first quoted field — silently, and only on some files. */
+function parseDelimited(text, sep) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch !== '"') { field += ch; continue; }
+      if (text[i + 1] === '"') { field += '"'; i += 1; continue; }
+      quoted = false;
+      continue;
+    }
+    if (ch === '"' && field === '') { quoted = true; continue; }
+    if (ch === sep) { row.push(field); field = ''; continue; }
+    if (ch === '\r') continue;
+    if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; continue; }
+    field += ch;
+  }
+  // A file that ends in a newline has already closed its last row. Pushing
+  // here unconditionally is what hangs a phantom empty row under every table.
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* A column of numbers reads as a column only when the digits line up, so the
+   alignment is decided per column over the whole file, never per cell: one
+   right-aligned value in a column of left-aligned ones is worse than neither. */
+const _NUM = /^-?\$?[\d,]*\.?\d+%?$/;
+
+function numericColumns(rows, width) {
+  const out = [];
+  for (let c = 0; c < width; c += 1) {
+    let seen = 0;
+    let numeric = 0;
+    for (let r = 0; r < rows.length; r += 1) {
+      const v = (rows[r][c] || '').trim();
+      if (!v) continue;
+      seen += 1;
+      if (_NUM.test(v)) numeric += 1;
+    }
+    out.push(seen > 0 && seen === numeric);
+  }
+  return out;
+}
 
 const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name, onClose }) {
   const [text, setText] = useState(null);
@@ -182,12 +231,28 @@ const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name,
 
   const isCsv = /\.(csv|tsv)$/i.test(name);
   /* Parsed once per file, not once per parent render. */
-  const { rows, cells } = useMemo(() => {
-    const r = (text || '').split('\n');
-    return { rows: r, cells: isCsv ? r.map((line) => line.split(',')) : null };
-  }, [text, isCsv]);
+  const table = useMemo(() => {
+    if (!isCsv || text === null) return null;
+    const rows = parseDelimited(text, /\.tsv$/i.test(name) ? '\t' : ',');
+    if (!rows.length) return null;
+    const width = rows.reduce((w, r) => Math.max(w, r.length), 0);
+    // A short row is padded rather than left short, so a ragged file cannot
+    // slide the columns under the wrong heading. The padding is empty cells,
+    // which is what a missing field is.
+    const pad = (r) => (r.length === width ? r : r.concat(Array(width - r.length).fill('')));
+    const body = rows.slice(1).map(pad);
+    return { head: pad(rows[0]), body, width, numeric: numericColumns(body, width) };
+  }, [text, isCsv, name]);
 
-  const hidden = cells ? Math.max(0, cells.length - shown) : 0;
+  const lines = useMemo(() => (text || '').split('\n'), [text]);
+  const hidden = table ? Math.max(0, table.body.length - shown) : 0;
+
+  let meta = 'loading…';
+  if (text !== null) {
+    meta = table
+      ? `${table.body.length.toLocaleString()} rows · ${table.width} columns · ${text.length.toLocaleString()} characters`
+      : `${lines.length.toLocaleString()} lines · ${text.length.toLocaleString()} characters`;
+  }
 
   return (
     <div className="sheet" role="dialog" aria-label={name} onClick={onClose}>
@@ -195,26 +260,34 @@ const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name,
         <div className="sheethead">
           <span className="ic" aria-hidden="true">▤</span>
           <b>{name}</b>
-          <span className="muted">
-            {text === null ? 'loading…' : `${rows.length.toLocaleString()} lines · ${text.length.toLocaleString()} characters`}
-          </span>
+          <span className="muted">{meta}</span>
           <button className="linkbtn" onClick={onClose}>close</button>
         </div>
         <div className="sheetbody">
           {err && <div className="err">{err}</div>}
-          {text !== null && isCsv && (
+          {table && (
             <table className="csv">
+              <thead>
+                <tr>
+                  <th className="ln" scope="col" />
+                  {table.head.map((c, j) => (
+                    <th key={j} scope="col" className={table.numeric[j] ? 'num' : ''}>{c}</th>
+                  ))}
+                </tr>
+              </thead>
               <tbody>
-                {cells.slice(0, shown).map((row, i) => (
-                  <tr key={i} className={i === 0 ? 'hd' : ''}>
-                    <td className="ln">{i === 0 ? '' : i}</td>
-                    {row.map((c, j) => <td key={j}>{c}</td>)}
+                {table.body.slice(0, shown).map((row, i) => (
+                  <tr key={i}>
+                    <td className="ln">{i + 1}</td>
+                    {row.map((c, j) => (
+                      <td key={j} className={table.numeric[j] ? 'num' : ''}>{c}</td>
+                    ))}
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
-          {text !== null && !isCsv && <pre>{text}</pre>}
+          {text !== null && !table && <pre>{text}</pre>}
           {hidden > 0 && (
             <p className="muted">
               {hidden.toLocaleString()} more rows not shown.{' '}

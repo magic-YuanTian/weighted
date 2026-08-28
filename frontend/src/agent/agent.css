@@ -488,10 +488,36 @@
 .wt4 .sheetbody pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.6; white-space:pre; }
 .wt4 .sheetbody .muted { font-size:12px; padding-top:10px; display:block; }
 
-.wt4 table.csv { border-collapse:collapse; font-family:var(--mono); font-size:11.5px; }
-.wt4 table.csv td { border-bottom:1px solid var(--line); padding:3px 10px 3px 0; white-space:nowrap; vertical-align:top; }
-.wt4 table.csv tr.hd td { position:sticky; top:0; background:var(--surface); font-weight:600; color:var(--ink); border-bottom:1px solid var(--line-2); }
-.wt4 table.csv td.ln { color:var(--ink-3); text-align:right; padding-right:12px; font-variant-numeric:tabular-nums; user-select:none; }
+/* separate, not collapse: a collapsed border belongs to the table rather than
+   the cell, and a sticky cell scrolls away from it leaving the header edgeless. */
+.wt4 table.csv { border-collapse:separate; border-spacing:0; font-family:var(--mono); font-size:11.5px; }
+.wt4 table.csv th, .wt4 table.csv td {
+  border-bottom:1px solid var(--line); padding:3px 12px 3px 8px;
+  vertical-align:top; text-align:left;
+  /* pre, not nowrap. Both refuse to wrap, but every collapsing value also eats
+     the spaces inside the cell -- and these are the dirty tables a task asks
+     the agent to clean, where "  MOBILE  " showing as "MOBILE" hides exactly
+     the thing that makes it dirty. */
+  white-space:pre;
+}
+.wt4 table.csv thead th {
+  position:sticky; top:0; z-index:2; background:var(--surface-2);
+  font-weight:600; color:var(--ink); border-bottom:1px solid var(--line-2);
+}
+.wt4 table.csv tbody tr:nth-child(even) td { background:var(--ground); }
+.wt4 table.csv tbody tr:hover td { background:var(--accent-soft); }
+/* The row number holds its column: hos_data is twelve columns of addresses and
+   scrolling right to read one loses which row you are on. */
+.wt4 table.csv .ln {
+  position:sticky; left:0; z-index:1; background:var(--surface);
+  color:var(--ink-3); text-align:right; padding-right:12px;
+  border-right:1px solid var(--line);
+  font-variant-numeric:tabular-nums; user-select:none;
+}
+.wt4 table.csv thead .ln { z-index:3; background:var(--surface-2); }
+.wt4 table.csv tbody tr:nth-child(even) .ln { background:var(--ground); }
+.wt4 table.csv tbody tr:hover .ln { background:var(--accent-soft); }
+.wt4 table.csv .num { text-align:right; font-variant-numeric:tabular-nums; }
 
 /* the red banner closes; connection weather is amber and closes itself */
 .wt4 .err { display:flex; align-items:flex-start; gap:8px; }
