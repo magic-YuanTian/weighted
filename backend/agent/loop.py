@@ -188,11 +188,20 @@ def _summarize_step(session, name, args, meta, changed):
         return "\n".join(lines)
     if name in ("write_file", "edit_file", "insert_file"):
         lines = []
+        # An edit marks every judged requirement it touches "stale" at once, so
+        # naming each one prints a wall of near-identical lines that reads like
+        # a page of warnings. One sentence carries the same information.
+        stale = [chg["id"] for chg in changed if chg["verdict"] == "stale"]
         for chg in changed:
+            if chg["verdict"] == "stale":
+                continue
             req = by_id.get(chg["id"])
             word = _VWORDS.get(chg["verdict"], chg["verdict"])
             detail = _plain_detail(req)
             lines.append(f"{chg['id']} is now {word}" + (f": {detail}" if detail else ""))
+        if stale:
+            names = ", ".join(stale) if len(stale) <= 4 else f"{len(stale)} requirements"
+            lines.append(f"{names} will be re-checked when the agent stops.")
         if not R.blocking(session.requirements):
             lines.append("Everything checked so far is met.")
         return "\n".join(lines)

@@ -26,6 +26,11 @@ PASSWORD = os.environ.get("WEIGHTTEXT_PASSWORD", "")
 def require_password():
     if not PASSWORD:
         return None
+    # The Codex sandbox curls the checker without credentials. The endpoint
+    # is read-only and gated on knowing a live session id, so exempting it
+    # exposes a requirement report, not the model or the workspace.
+    if request.path == "/api/agent/check":
+        return None
     auth = request.authorization
     # compare_digest, not ==: the comparison is over the network and a shared
     # password is short enough for timing to matter.

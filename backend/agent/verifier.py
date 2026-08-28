@@ -360,19 +360,47 @@ def _judge_view(doc):
     return "\n".join(parts)
 
 
-def judge(reqs, doc, task_brief=""):
+def _reference_view(session):
+    """The attachments, rendered for the judge. They are invisible to every
+    code check on purpose — they are source material, not the deliverable —
+    but a requirement that *relates* the deliverable to its source (keep
+    every row, repair value X) is unjudgeable without the source in view. In
+    the first wrangling pilot the judge said exactly that, five times over:
+    "the original table is not provided, so retention cannot be verified",
+    and held the finish gate shut on work that was correct."""
+    att = getattr(session, "attachments", None)
+    if att is None:
+        return ""
+    parts = []
+    for name in att.list():
+        parts.append(f"=== attachment: {name} ===\n{att.read(name) or ''}")
+    return "\n".join(parts)
+
+
+def judge(reqs, doc, task_brief="", reference=""):
     """One batched call for every judge-verified requirement. Returns
     {id: (verdict, detail, quote, confidence)}."""
     targets = [r for r in reqs if r.get("verify") == "judge" and r.get("status") == "active"]
     if not targets or not doc["text"].strip():
         return {}
 
+    # No length cap. A capped view once cut every T2R report past ~1,900
+    # words mid-sentence, and the judge honestly ruled "ends abruptly"
+    # against an ending it was never shown. The judge must see exactly what
+    # the user sees, whole.
     lines = []
     if task_brief:
         lines += [f"Task brief: {task_brief}", ""]
+    if reference:
+        lines += ["The user attached reference material. It is not part of the",
+                  "deliverable and is not itself under review — use it as the",
+                  "source of truth when a requirement relates the document to",
+                  "it: rows or columns to keep, values to repair, data to stay",
+                  "faithful to.",
+                  "---", reference, "---", ""]
     lines += ["Document under review. Each file appears under a '=== file: NAME ==='",
               "header; the headers are metadata, not part of the text.",
-              "---", _judge_view(doc)[:12000], "---", "",
+              "---", _judge_view(doc), "---", "",
               "Judge each requirement:"]
     for r in targets:
         scope = r.get("scope") or {}
@@ -428,11 +456,42 @@ def verify(session, judge_pass=False, **kw):
     reports = []
 
     if judge_pass:
+        # A judge verdict is recomputed only when the text under it has
+        # changed. Judging identical bytes twice lets the model flip a
+        # borderline call: in the pilot the agent gave up on "max_freq is a
+        # constant" under a violated verdict, and the end-of-run recheck
+        # flipped it to satisfied over the same text — the chat then said
+        # "cannot be satisfied" beside a green R12. Unverified, stale and
+        # edited scopes are still judged; settled ones keep their verdict.
+        fresh = []
+        for r in session.requirements:
+            if r.get("verify") != "judge" or r.get("status") != "active":
+                continue
+            prev_rep = r.get("report") or {}
+            rng = resolve_scope(r, doc)
+            if (rng is not None and prev_rep.get("scopeHash")
+                    and prev_rep.get("verdict") in ("satisfied", "violated")
+                    and prev_rep["scopeHash"] == _hash(doc["text"][rng[0]:rng[1]])):
+                continue
+            fresh.append(r)
         try:
-            judged = judge(session.requirements, doc, session.brief)
+            judged = judge(fresh, doc, session.brief,
+                           reference=_reference_view(session))
         except Exception as e:                                # noqa: BLE001
-            print(f"[verifier] judge pass failed, keeping prior verdicts: {e}")
-            judged = {}
+            # One retry: a dropped connection right after a long turn is the
+            # common case, and a silently-stale rail blocks the gate on
+            # everything at once — which reads as 33 sudden failures.
+            print(f"[verifier] judge pass failed, retrying once: {e}")
+            try:
+                judged = judge(fresh, doc, session.brief,
+                               reference=_reference_view(session))
+            except Exception as e2:                           # noqa: BLE001
+                print(f"[verifier] judge pass failed twice, keeping prior "
+                      f"verdicts: {e2}")
+                session.log("notice", text="The reviewer could not check the "
+                            "text just now (connection problem). Earlier "
+                            "verdicts are kept — the next run re-checks them.")
+                judged = {}
     else:
         judged = {}
     edits = [e for e in session.events

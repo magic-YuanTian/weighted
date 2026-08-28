@@ -21,7 +21,22 @@ function describeStep(ev) {
   if (meta.ok === false) {
     if (ev.action === 'edit_file' || ev.action === 'write_file'
         || ev.action === 'insert_file') return `An edit to ${f} didn't apply`;
-    if (ev.action === 'read_file') return `Couldn't find ${f}`;
+    if (ev.action === 'read_file') {
+      /* "Couldn't find the report" while report.md sits in the workspace is
+         an alarm, not a summary. Only a genuinely missing file earns it — a
+         read past the end of a real file says exactly that instead. */
+      if (meta.reason === 'range') return `Tried to read past the end of ${f}`;
+      if (meta.reason === 'missing') return `Couldn't find ${f}`;
+      return `Couldn't read ${f}`;
+    }
+    /* A failed shell command is routine agent work, not an app problem —
+       "Something went wrong" reads as the latter. Name what happened; the
+       output is one click away in the expanded step. */
+    if (ev.action === 'command') {
+      const cmd = (ev.argSummary || '').trim();
+      return cmd ? `Ran: ${cmd} — it failed` : 'A command failed';
+    }
+    if (ev.action === 'run_check') return 'Tried to check the requirements — the check failed';
     return 'Something went wrong';
   }
   switch (ev.action) {
@@ -30,6 +45,10 @@ function describeStep(ev) {
     case 'insert_file': return `Added to ${f}`;
     case 'read_file': return `Read ${f}`;
     case 'list_files': return 'Looked over the files';
+    case 'command': {
+      const cmd = (ev.argSummary || '').trim();
+      return cmd ? `Ran: ${cmd}` : 'Ran a command';
+    }
     case 'run_check': {
       const head = (ev.summary || '').split('\n')[0];
       return head ? `Checked the requirements — ${head}` : 'Checked the requirements';

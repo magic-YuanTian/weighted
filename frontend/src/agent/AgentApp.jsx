@@ -22,7 +22,7 @@ const REVIEW_FLOW = () => window.location.hash.includes('review');
 export default function AgentApp() {
   const [stage, setStage] = useState(REVIEW_FLOW() ? 'brief' : 'run');
   const [sessionId, setSessionId] = useState(null);
-  const [snap, setSnap] = useState(null);
+  const [snap, _setSnap] = useState(null);
   const [review, setReview] = useState(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -31,17 +31,39 @@ export default function AgentApp() {
   const [running, setRunning] = useState(false);
   const [pending, setPending] = useState(false);
   const [outbox, setOutbox] = useState(null);   // shown before the server answers
+  const [net, setNet] = useState('');           // connection weather — self-clearing
   const [ctx, setCtx] = useState(null);
   const runRef = useRef(false);
+  // the ref must track the snapshot synchronously: the run loop reads it in
+  // the same tick as setSnap, before any effect has had a chance to fire
+  const snapRef = useRef(null);
+  const setSnap = useCallback((s) => { snapRef.current = s; _setSnap(s); }, []);
 
-  const fail = (e) => setError(String(e.message || e));
+  /* A dropped connection is weather, not an application error: it goes in the
+     amber pill and clears itself the moment a request gets through. Only real
+     failures earn the red banner — which now also has a close button, because
+     an error that outlives its moment reads as "the app is broken". */
+  const fail = (e) => {
+    if (e && e.network) setNet(String(e.message || e));
+    else setError(String(e.message || e));
+  };
 
   // Nothing may fail silently. A dead click with no explanation is the worst
   // possible state for a study screen: the participant cannot tell a slow model
   // from a broken app, and neither can we from the logs.
   useEffect(() => {
-    const onErr = (e) => setError(`JS error: ${e.message || e.reason || e}`);
-    const onRej = (e) => setError(`Unhandled promise: ${(e.reason && e.reason.message) || e.reason}`);
+    // Browser noise that is not an app failure: layout observers running a
+    // frame late, opaque cross-origin "Script error." with no content.
+    const benign = /ResizeObserver|^Script error\.?$/;
+    const onErr = (e) => {
+      const m = String(e.message || e.reason || e);
+      if (!benign.test(m)) setError(`JS error: ${m}`);
+    };
+    const onRej = (e) => {
+      const r = e.reason;
+      if (r && (r.name === 'AbortError' || r.network)) return;
+      setError(`Unhandled promise: ${(r && r.message) || r}`);
+    };
     window.addEventListener('error', onErr);
     window.addEventListener('unhandledrejection', onRej);
     return () => {
@@ -52,24 +74,91 @@ export default function AgentApp() {
 
   // Chat-first: the session exists before the user types, so the first message
   // is a message and not a form submission.
+  //
+  // A reload must not eat a run: mid-task refreshes restore the same session
+  // (the backend keeps it on disk). Only a finished one starts fresh, so
+  // "refresh after the task" still begins the next task cleanly — and
+  // sessionStorage scopes this to the tab, so a new tab is always a new run.
+  const createdRef = useRef(false);   // StrictMode runs effects twice; one session is enough
   useEffect(() => {
-    if (REVIEW_FLOW() || sessionId) return;
-    let alive = true;
-    api.createSession('')
-      .then((s) => { if (alive) { setSessionId(s.sessionId); setSnap(s); } })
-      .catch(fail);
-    return () => { alive = false; };
-  }, [sessionId]);
+    if (REVIEW_FLOW() || sessionId || createdRef.current) return;
+    createdRef.current = true;
+    const stored = (() => {
+      try { return window.sessionStorage.getItem('wt-session'); } catch (e) { return null; }
+    })();
+    const boot = async () => {
+      if (stored) {
+        try {
+          const s = await api.state(stored);
+          if (s.status !== 'done') { setSessionId(stored); setSnap(s); return; }
+        } catch (e) { /* stale or unknown id — start fresh */ }
+      }
+      const s = await api.createSession('');
+      setSessionId(s.sessionId);
+      setSnap(s);
+      try { window.sessionStorage.setItem('wt-session', s.sessionId); } catch (e) {}
+    };
+    boot().catch((e) => { createdRef.current = false; fail(e); });
+  }, [sessionId, setSnap]);
+
+  // Under the codex engine one step is a whole agent turn and the backend
+  // appends events as they stream in. Polling the state while a step is in
+  // flight keeps the three panes live instead of frozen until the turn ends.
+  // …and also while the backend says "running" with no local step in flight —
+  // that is a restored session whose turn is still going server-side.
+  const live = pending || !!(snap && snap.status === 'running');
+  useEffect(() => {
+    if (!live || !sessionId) return undefined;
+    const t = setInterval(() => {
+      api.state(sessionId).then((s) => { setSnap(s); setNet(''); }).catch(() => {});
+    }, 2500);
+    return () => clearInterval(t);
+  }, [live, sessionId, setSnap]);
 
   /* ------------------------------------------------------------- the loop */
+
+  /* After a dropped /step response the turn usually keeps running server-side.
+     Poll until the backend answers and the turn is over, then say what the run
+     should do: true/false = keep going / stop, 'retry' = the request never
+     landed at all, null = gave up. */
+  const waitForIdle = useCallback(async (evBefore) => {
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline && runRef.current) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 4000));
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const s = await api.state(sessionId);
+        setSnap(s);
+        if (s.status === 'running') {
+          setNet('Reconnected — the agent is still working…');
+          continue;
+        }
+        setNet('');
+        if (((s.events || []).length) <= evBefore) return 'retry';
+        return s.canContinue !== false;
+      } catch (e) {
+        setNet('Connection lost — retrying…');
+      }
+    }
+    return null;
+  }, [sessionId, setSnap]);
+
   const stepOnce = useCallback(async () => {
     setPending(true);
     try {
       const res = await api.step(sessionId);
+      if (res.busy) {
+        // a turn is already running for this session (a reconnect race, or a
+        // double click) — don't start another, just wait for it
+        const more = await waitForIdle(-1);
+        return more === true || more === 'retry';
+      }
       setSnap(res.snapshot);
+      setNet('');
       return res.canContinue;
     } finally { setPending(false); }
-  }, [sessionId]);
+  }, [sessionId, waitForIdle, setSnap]);
 
   const doStep = useCallback(async () => {
     setBusy('taking one step');
@@ -83,8 +172,25 @@ export default function AgentApp() {
     setError('');
     try {
       for (let i = 0; i < MAX_AUTO_STEPS && runRef.current; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        const more = await stepOnce();
+        const evBefore = ((snapRef.current && snapRef.current.events) || []).length;
+        let more;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          more = await stepOnce();
+        } catch (e) {
+          if (!e.network) throw e;
+          // The wire dropped mid-step. The turn is likely still running on
+          // the server — reconnect and pick the run back up instead of
+          // stopping with a red banner.
+          setNet('Connection unstable — reconnecting…');
+          // eslint-disable-next-line no-await-in-loop
+          more = await waitForIdle(evBefore);
+          if (more === null) {
+            if (!runRef.current) break;   // paused while reconnecting — just stop
+            throw e;
+          }
+          if (more === 'retry') continue;   // the step never landed; send it again
+        }
         if (!more) break;
       }
       // Judged requirements cost a model call, so they are not re-run per step
@@ -94,10 +200,19 @@ export default function AgentApp() {
     } catch (e) { fail(e); } finally {
       runRef.current = false;
       setRunning(false);
+      setNet('');
     }
-  }, [stepOnce, sessionId]);
+  }, [stepOnce, waitForIdle, sessionId, setSnap]);
 
-  const pause = () => { runRef.current = false; setRunning(false); };
+  /* Pause must reach the backend: under codex the current "step" is a whole
+     multi-minute turn, and a restored session may have no local loop at all —
+     stopping only the client flag reads as a dead button. Best-effort: the
+     local loop stops regardless, even if the pause request rides bad wifi. */
+  const pause = useCallback(() => {
+    runRef.current = false;
+    setRunning(false);
+    if (sessionId) api.pause(sessionId).then(setSnap).catch(() => {});
+  }, [sessionId, setSnap]);
 
   /* The first message costs a model call (it is also the requirement
      extraction), so the screen must answer the keystroke, not the round trip:
@@ -113,11 +228,29 @@ export default function AgentApp() {
       await doRun();
       return true;
     } catch (e) {
+      // A dropped response does not mean a dropped message: if the backend
+      // already logged it, carry on with the run instead of bouncing the text
+      // back (a resend would duplicate the message and the extraction).
+      if (e.network && sessionId) {
+        try {
+          const s = await api.state(sessionId);
+          const landed = (s.events || []).some(
+            (ev) => ev.type === 'user' && ev.text === text.trim(),
+          );
+          if (landed) {
+            setSnap(s);
+            setOutbox(null);
+            setBusy('');
+            await doRun();
+            return true;
+          }
+        } catch (e2) { /* backend truly unreachable — fall through */ }
+      }
       fail(e);
       setOutbox(null);
       return false;              // the composer keeps the text so it is not lost
     } finally { setBusy(''); }
-  }, [sessionId, doRun]);
+  }, [sessionId, doRun, setSnap]);
 
   // "Fix this"-style scoped instructions and anchored edits both ride this:
   // queue at the head of the next step, then run — one intention, one outcome.
@@ -128,14 +261,14 @@ export default function AgentApp() {
       setBusy('');
       await doRun();
     } catch (e) { fail(e); } finally { setBusy(''); }
-  }, [sessionId, doRun]);
+  }, [sessionId, doRun, setSnap]);
 
   /* --------------------------------------------------------------- store */
   const requirementAction = useCallback(async (payload) => {
     setBusy('updating requirements');
     try { setSnap(await api.requirement(sessionId, payload)); }
     catch (e) { fail(e); } finally { setBusy(''); }
-  }, [sessionId]);
+  }, [sessionId, setSnap]);
 
   const answerQuestion = useCallback(async (question, option) => {
     const target = (snap.requirements || []).find((r) => r.id === question.affects)
@@ -146,7 +279,7 @@ export default function AgentApp() {
       const res = await api.answer(sessionId, target, question.text, option);
       if (res.snapshot) setSnap(res.snapshot);
     } catch (e) { fail(e); } finally { setBusy(''); }
-  }, [sessionId, snap]);
+  }, [sessionId, snap, setSnap]);
 
   /* v3's freeze, carried into the agent world: a frozen span becomes a
      `preserve` requirement with Tier-0 enforcement, so the edit tool — not the
@@ -168,7 +301,7 @@ export default function AgentApp() {
       setSnap(await api.recheck(sessionId, false));
       api.telemetry(sessionId, 'freeze', { file, chars: text.length });
     } catch (e) { fail(e); } finally { setBusy(''); }
-  }, [sessionId]);
+  }, [sessionId, setSnap]);
 
   const saveFile = useCallback(async (path, text) => {
     setBusy('saving your edit');
@@ -176,7 +309,7 @@ export default function AgentApp() {
       setSnap(await api.writeFile(sessionId, path, text));
       api.telemetry(sessionId, 'edit-file', { path, chars: text.length });
     } catch (e) { fail(e); } finally { setBusy(''); }
-  }, [sessionId]);
+  }, [sessionId, setSnap]);
 
   /* replace / insert: an instruction anchored to an exact quote, so "this
      paragraph" is never ambiguous the way it is in chat. */
@@ -191,7 +324,7 @@ export default function AgentApp() {
 
   const toggleGate = useCallback(async () => {
     try { setSnap(await api.gate(sessionId, !snap.gateOn)); } catch (e) { fail(e); }
-  }, [sessionId, snap]);
+  }, [sessionId, snap, setSnap]);
 
   const jump = useCallback((target) => {
     setFocus({ ...target, nonce: Date.now() });
@@ -226,7 +359,7 @@ export default function AgentApp() {
       });
       setStage('review');
     } catch (e) { fail(e); } finally { setBusy(''); }
-  }, []);
+  }, [setSnap]);
 
   const commit = useCallback(async () => {
     if (!review) return;
@@ -236,7 +369,7 @@ export default function AgentApp() {
       setSnap(await api.commit(sessionId, reqs, review.questions, review.brief));
       setStage('run');
     } catch (e) { fail(e); } finally { setBusy(''); }
-  }, [review, sessionId]);
+  }, [review, sessionId, setSnap]);
 
   if (stage === 'brief') {
     return (
@@ -286,13 +419,19 @@ export default function AgentApp() {
           onExport={() => window.open(api.exportUrl(sessionId), '_blank')}
         />
       )}
-      {error && <div className="err">{error}</div>}
+      {error && (
+        <div className="err">
+          <span>{error}</span>
+          <button className="x" onClick={() => setError('')} aria-label="dismiss error">×</button>
+        </div>
+      )}
+      {net && !error && <div className="net">{net}</div>}
       <div className="cols">
         <RunStream
           snap={snap}
           focus={focus}
           running={running}
-          pending={pending}
+          pending={live}
           busy={busy}
           outbox={outbox}
           onRun={doRun}

@@ -11,18 +11,18 @@ Afterwards the picker in the composer offers the six tasks. Without them the
 so the app works either way.
 
 Sources
-    CodeIF       github.com/lin-rany/codeIF          (no licence file)
-    T2R-bench    hf.co/datasets/Tele-AI/TeleTableBench (no licence file)
-    LongWeave    hf.co/datasets/zikaixiao1/LongWeave   (MIT)
+    CodeIF          github.com/lin-rany/codeIF        (no licence file)
+    AutoDCWorkflow  github.com/LanLi2017/LLM4DC       (no licence file)
+    LongWeave       hf.co/datasets/zikaixiao1/LongWeave (MIT)
 
-Two of the three archives are large. Neither is downloaded whole: the T2R
-tables are pulled out of a 234 MB zip through range requests over its central
-directory, and the LongWeave file is streamed only as far as the rows we need.
+Only the LongWeave file is large, and it is streamed just as far as the rows
+we need; everything else is a handful of small direct fetches.
 """
 
+import csv
+import io
 import json
 import os
-import struct
 import sys
 import urllib.request
 
@@ -32,7 +32,7 @@ DATA = os.path.join(TASKS, "data")
 
 CODEIF_URL = ("https://raw.githubusercontent.com/lin-rany/codeIF/master/"
               "data/question/final_release_1200.jsonl")
-T2R_BASE = "https://huggingface.co/datasets/Tele-AI/TeleTableBench/resolve/main/data/"
+DCW_BASE = "https://raw.githubusercontent.com/LanLi2017/LLM4DC/main/"
 LONGWEAVE_URL = ("https://huggingface.co/datasets/zikaixiao1/LongWeave/"
                  "resolve/main/longweave.jsonl")
 
@@ -55,10 +55,41 @@ CODEIF_DROP = {
         16: "requires sort_event from Flask; Flask has no such function",
     },
 }
-T2R_TABLES = ["metainputs_transmission_distribution",
-              "2020_MTA_Metro_North_On_Time_Performance_Data"]
-T2R_KEYPOINTS = [6, 10]          # which query to take for each table
 LONGWEAVE_TASK = "longweave/AP_STYLE_WRITING/2k"
+
+# Appended to both CodeIF briefs. The benchmark's own constraints are additive
+# and the agent satisfies them unattended; these interact — line width fights
+# the docstring rule, the eight-line cap fights the no-comprehension rule — so
+# holding one in focus while fixing another is what the highlight feature is
+# for. Measured at reasoning "none": with this paragraph the agent churns
+# (8 gate bounces, violations left); without it, it converges alone.
+CODEIF_HOUSE_STYLE = (
+    "The file must also satisfy a house style. Keep every line under 80 "
+    "characters. Keep every function body, the lines between the def line "
+    "and the end of the function, to at most eight lines. Give every "
+    "function and every class a one-line docstring that says what it "
+    "takes (self aside) and what it returns. Do not leave blank lines "
+    "inside any function body, and do not use list comprehensions "
+    "anywhere; write the loops out instead.")
+
+# Per-question clarifiers appended after the benchmark constraints. 738's
+# list pairs "snake_case variable names" with "max_freq should be a
+# constant"; read strictly those collide (MAX_FREQ fails one, max_freq the
+# other) and the agent ping-pongs — measured. The clarifier picks the one
+# consistent reading instead of leaving the collision in the task.
+CODEIF_CLARIFY = {
+    367: "One clarification so no requirement is impossible: PyTorch's "
+         "import name is torch, so `import torch` is how the pytorch "
+         "import requirement is satisfied.",
+    738: "One clarification so the naming rules cannot collide: 'a "
+         "constant' here means max_freq is assigned exactly once and never "
+         "reassigned; its name stays max_freq, in snake_case, not "
+         "upper-case. In addition: max_frequency_component must reject bad "
+         "input — a signal that is not a list, or an empty list, raises "
+         "ValueError with the message 'signal must be a non-empty list' — "
+         "and every function that returns a value must do so from exactly "
+         "one return statement.",
+}
 
 
 def log(msg):
@@ -68,54 +99,6 @@ def log(msg):
 def fetch(url, timeout=600):
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return r.read()
-
-
-def fetch_range(url, start, end, timeout=300):
-    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
-
-
-def content_length(url):
-    req = urllib.request.Request(url, method="HEAD")
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return int(r.headers["Content-Length"])
-
-
-# ----------------------------------------------------------------- zip by range
-
-def zip_members(url, size):
-    """Filename -> (offset, compressed size, method), read from the central
-    directory alone. Avoids downloading a 234 MB archive for two small files."""
-    tail = fetch_range(url, max(0, size - 70000), size - 1)
-    i = tail.rfind(b"PK\x05\x06")
-    if i < 0:
-        raise RuntimeError("zip end-of-central-directory not found")
-    cd_size, cd_off = struct.unpack("<II", tail[i + 12:i + 20])
-    cd = fetch_range(url, cd_off, cd_off + cd_size - 1)
-    out, p = {}, 0
-    while p < len(cd) - 4 and cd[p:p + 4] == b"PK\x01\x02":
-        method, = struct.unpack("<H", cd[p + 10:p + 12])
-        comp, = struct.unpack("<I", cd[p + 20:p + 24])
-        nlen, elen, clen = struct.unpack("<HHH", cd[p + 28:p + 34])
-        lho, = struct.unpack("<I", cd[p + 42:p + 46])
-        name = cd[p + 46:p + 46 + nlen].decode("utf-8", "replace")
-        out[name] = (lho, comp, method)
-        p += 46 + nlen + elen + clen
-    return out
-
-
-def zip_read(url, member):
-    """One member's bytes, fetched by range and inflated locally."""
-    import zlib
-    offset, comp, method = member
-    head = fetch_range(url, offset, offset + 29)
-    nlen, elen = struct.unpack("<HH", head[26:30])
-    body_at = offset + 30 + nlen + elen
-    raw = fetch_range(url, body_at, body_at + comp - 1)
-    if method == 0:
-        return raw
-    return zlib.decompress(raw, -zlib.MAX_WBITS)
 
 
 # ----------------------------------------------------------------- the tasks
@@ -136,99 +119,160 @@ def build_codeif(meta, briefs):
         drop = CODEIF_DROP.get(qid, {})
         kept = [x for i, x in enumerate(r["instruction_list"], start=1)
                 if i not in drop]
-        ins = "\n".join(f"{i+1}. {x['instruction']}" for i, x in enumerate(kept))
+        # A brief that says "Requirements:" and numbers them tells participants
+        # that these are the requirements and the rest of the text is not —
+        # and hands them the tracking the tool is supposed to be doing. The
+        # sentences are kept verbatim, woven into a paragraph.
+        ins = " ".join(s if s.endswith((".", "!", "?")) else s + "."
+                       for s in (x["instruction"].strip() for x in kept))
         for i in sorted(drop):
             log(f"            dropped #{i}: {drop[i]}")
-        briefs[f"codeif_{qid}"] = (r["question"].strip() + "\n\nRequirements:\n" + ins
+        clarify = CODEIF_CLARIFY.get(qid)
+        briefs[f"codeif_{qid}"] = (r["question"].strip() + "\n\n" + ins
+                                   + (" " + clarify if clarify else "")
+                                   + "\n\n" + CODEIF_HOUSE_STYLE
                                    + "\n\nWrite the solution to solution.py.")
         first = n == 1
         meta.append(dict(
             id=f"codeif_{qid}", n=n, domain="Code generation", benchmark="CodeIF",
-            label=(f"CodeIF {n} — sentiment app, {len(kept)} constraints"
+            label=(f"CodeIF {n} — sentiment app, {len(kept)} constraints + house style"
                    if first else
-                   f"CodeIF {n} — frequency analysis, {len(kept)} constraints"),
+                   f"CodeIF {n} — frequency analysis, {len(kept)} constraints + house style"),
             dropped=[{"index": i, "reason": drop[i],
                       "instruction": r["instruction_list"][i - 1]["instruction"]}
                      for i in sorted(drop)],
             source=f"CodeIF (ACL 2025 Industry) question_id {qid}, "
                    f"{r['meta_info']['item_set']} split, Python",
-            note=("No for-loop but a while-loop is required, at most 2 classes, no "
-                  "deque — satisfying one constraint tends to break another." if first else
-                  "Same constraint count as the other CodeIF task but from a different "
-                  "shipped split, so the pair separates difficulty from constraint count."),
-            tested=first))
+            note=("Benchmark constraints plus the house style. Measured at "
+                  "reasoning none: the benchmark list alone converges "
+                  "unattended in one turn; with the house style the run "
+                  "sticks at the turn cap with 8 gate bounces." if first else
+                  "Same treatment as the other CodeIF task, plus the "
+                  "benchmark's own max_freq tension (snake_case vs constant) "
+                  "— the pair that exercises requirement editing. Measured "
+                  "at reasoning none: 8 bounces unattended, and "
+                  "highlighting the violated requirements moved 4 "
+                  "violations down to 1 in one sitting."),
+            tested=True))
         log(f"            task {n}: question_id {qid}, {len(kept)} constraints"
             + (f" ({len(drop)} dropped as unsatisfiable)" if drop else ""))
 
 
-T2R_BRIEF = """{query}
+# The two AutoDCWorkflow instances. The benchmark's unit is (dirty table,
+# purpose) with a gold cleaned table and a gold OpenRefine recipe — a
+# sequence of data transformations, which is what makes these data WRANGLING
+# tasks rather than analysis. Edit policy for these briefs (2026-08-27,
+# study design): benchmark requirements may be DELETED (reason recorded) or
+# RESTATED, never added — no invented constraints, no extra deliverables.
+# The cleaning instructions verbalize each instance's actual dirty->clean
+# diff (verified against the gold tables, not the recipe JSON, whose
+# mass-edit lists were recorded against other samples), and the only
+# deliverables are the benchmark's own: the cleaned table, plus the answer
+# to the instance's purpose question, quoted verbatim, with no format
+# constraints of ours attached. One deletion, recorded here and in the
+# manifest: the gold flights table renders arrival times through
+# OpenRefine's toDate(), which stamps a fake date and blanks 8 cells it
+# fails to parse; that step is dropped, and the surviving normalization is
+# restated against the format the same table's departure columns already
+# use, which loses nothing and keeps every cell checkable.
+DCW = [
+    dict(
+        n=3, pid=148, stem="hos_data_p148",
+        table="datasets/hospital/hos_data_p148.csv",
+        label="AutoDCWorkflow 1 — hospital registry, 2 dirty columns",
+        intro="The attached table hos_data_p148.csv lists twenty hospital "
+              "records, and the two columns the question depends on are dirty.",
+        clean="""In cleaned.csv's CountyName column, trim the
+padded whitespace, put every value in uppercase, and fix the two corrupted
+names: CHILTuN is CHILTON and COmFEE is COFFEE. In cleaned.csv's
+EmergencyService column, trim and uppercase every value, then repair the
+corrupted entries so the column holds only YES or NO — YsS, YEz, MES and rES
+all mean YES. In cleaned.csv, leave every other column exactly as it is.""",
+        note="Nothing here is added to the benchmark: the brief quotes the "
+             "purpose verbatim and restates the gold dirty->clean diff in "
+             "prose; the deliverables are the cleaned table and the answer "
+             "to the purpose question, unstyled. Measured at reasoning none "
+             "after the 2026-08-27 edit-policy revision: converges "
+             "unattended, 2/2 runs, 2 turns, one to two minutes — the "
+             "verification-showcase warm-up, not a churn task.",
+        tested=True),
+    dict(
+        n=4, pid=117, stem="flights_data_p117",
+        table="datasets/flights/dirty_tables/flights_data_p117.csv",
+        label="AutoDCWorkflow 2 — flight times, 3 dirty columns",
+        intro="The attached table flights_data_p117.csv records fifty flights' "
+              "scheduled and actual times, collected from a tangle of travel "
+              "sites; the source names and both arrival-time columns are dirty.",
+        clean="""In cleaned.csv's src column, three names are special:
+HLight becomes HELLOFLIGHT, USAT becomes USATODAY, and world-flight-tracker
+becomes WORLD-FLIGHT-TRACKER, keeping its hyphens. Every other name loses
+its underscore and dash decoration — turn them into spaces, trim, and put
+the name in uppercase, so --co-- becomes CO and __flightaware__ becomes
+FLIGHTAWARE. In cleaned.csv's two arrival columns, sched_arr_time and
+act_arr_time, strip the same underscore and dash decoration and write every
+value in the format the departure columns of the same table already use — a
+lowercase time that keeps the :00 on whole hours, so 2:20-P.M. becomes
+2:20 p.m. and __8:00_a.m.__ becomes 8:00 a.m. In cleaned.csv, leave the
+departure columns and every other column untouched.""",
+        dropped=[dict(
+            step="OpenRefine toDate() on sched_arr_time and act_arr_time",
+            reason="the gold table's toDate() stamps a fake date on every "
+                   "arrival time and blanks 8 cells it fails to parse; the "
+                   "step is deleted and the surviving normalization is "
+                   "restated against the departure columns' own format")],
+        note="The heavier half of the pair, and still pure benchmark: a "
+             "name-folding pass whose three exceptions come from the gold "
+             "table itself, the purpose question verbatim, no added "
+             "constraints. One gold step deleted and recorded (toDate). "
+             "Measured at reasoning none after the 2026-08-27 edit-policy "
+             "revision: converges unattended, 2/2 runs, 1-3 turns, outputs "
+             "spot-checked correct; its pre-memo ancestor stuck about one "
+             "run in four on the folding exceptions, so a stick stays "
+             "possible but cannot be counted on.",
+        tested=True),
+]
 
-Write the report to report.md.
+DCW_BRIEF = """{intro} The question, quoted from the benchmark: "{purpose}"
 
-Report standards. Ground the analysis in the data provided. Support each
-conclusion with data. Keep the structure logical, from problem definition
-through to conclusions and recommendations. Keep it readable, and go beyond
-review to give specific recommendations.
+{clean}
 
-Requirements:
-1. The report must be at least 1000 words.
-2. Keep the content detailed, avoiding repetition and vague description.
-3. If the data has gaps, adjust the analysis perspective rather than saying
-   "insufficient data".
+Write the cleaned table to cleaned.csv, keeping the header, every row, every
+column, and the original row order — the repairs above are the only changes.
+Then write the answer to the quoted question to answer.md, worked from
+cleaned.csv.
 
-The data is attached as {name}.csv."""
+The data is attached as {stem}.csv."""
 
 
-def build_t2r(meta, briefs):
-    log("T2R-bench   fetching queries…")
-    rows = json.loads(fetch(T2R_BASE + "data_en.json").decode("utf-8"))
-
-    zip_url = T2R_BASE + "table_en.zip"
-    size = content_length(zip_url)
-    log(f"            reading the {size/1e6:.0f} MB table archive by range…")
-    members = zip_members(zip_url, size)
+def build_dcw(meta, briefs):
+    log("AutoDCWork  fetching purposes and dirty tables…")
+    text = fetch(DCW_BASE + "purposes/all_purposes.csv").decode("utf-8")
+    purposes = {int(r["ID"]): r["Purposes"].strip()
+                for r in csv.DictReader(io.StringIO(text))}
 
     os.makedirs(DATA, exist_ok=True)
-    for i, stem in enumerate(T2R_TABLES):
-        want_kp = T2R_KEYPOINTS[i]
-        best = None
-        for row in rows:
-            path = row["file_path"]
-            query, kp = row["question"], row["reference_key_points"]
-            if os.path.basename(path.rstrip("/")) != stem:
-                continue
-            n_kp = len([x for x in kp.split("Key Point") if x.strip()])
-            if best is None or abs(n_kp - want_kp) < abs(best[1] - want_kp):
-                best = (query, n_kp)
-        if best is None:
-            raise RuntimeError(f"T2R table {stem} not found in data_en.json")
-        query, n_kp = best
-
-        name = next((m for m in members
-                     if m.endswith(f"{stem}/{stem}.csv")), None)
-        if name is None:
-            raise RuntimeError(f"T2R table {stem}.csv not found in the archive")
-        table = zip_read(zip_url, members[name]).decode("utf-8", "replace")
-        with open(os.path.join(DATA, f"{stem}.csv"), "w", encoding="utf-8") as fh:
+    for t in DCW:
+        purpose = purposes.get(t["pid"])
+        if not purpose:
+            raise RuntimeError(f"AutoDCWorkflow purpose {t['pid']} not found upstream")
+        table = fetch(DCW_BASE + t["table"]).decode("utf-8", "replace")
+        with open(os.path.join(DATA, t["stem"] + ".csv"), "w", encoding="utf-8") as fh:
             fh.write(table)
 
-        n = 3 + i
-        first = i == 0
-        briefs[f"t2r_{n}"] = T2R_BRIEF.format(query=query, name=stem)
+        n = t["n"]
+        briefs[f"dcw_{n}"] = DCW_BRIEF.format(intro=t["intro"], purpose=purpose,
+                                              clean=t["clean"], stem=t["stem"])
         meta.append(dict(
-            id=f"t2r_{n}", n=n, domain="Data wrangling", benchmark="T2R-bench",
-            attachments=[f"{stem}.csv"],
-            label=(f"T2R-bench {n-2} — transmission costs, {n_kp} keypoints" if first
-                   else f"T2R-bench {n-2} — rail punctuality, {n_kp} keypoints"),
-            source=f"T2R-bench (arXiv:2508.19813) {stem}, "
-                   f"{len(table):,}-char table, {n_kp} keypoints",
-            note=("'Never say insufficient data' bans the honest escape hatch; the "
-                  "1000-word floor fights the no-padding rule on a 3.5 KB table."
-                  if first else
-                  "The largest table still inside the 20,000-character read limit, and "
-                  "the most keypoints in the pool — coverage competes with the floor."),
-            tested=first))
-        log(f"            task {n}: {stem}.csv, {len(table):,} chars, {n_kp} keypoints")
+            id=f"dcw_{n}", n=n, domain="Data wrangling", benchmark="AutoDCWorkflow",
+            attachments=[t["stem"] + ".csv"],
+            label=t["label"],
+            dropped=t.get("dropped", []),
+            source=f"AutoDCWorkflow (arXiv:2412.06724) purpose {t['pid']}, "
+                   f"{len(table):,}-char dirty table, gold clean table and "
+                   f"recipe in LanLi2017/LLM4DC",
+            note=t["note"], tested=t["tested"]))
+        log(f"            task {n}: {t['stem']}.csv, {len(table):,} chars, "
+            f"purpose {t['pid']}")
 
 
 def build_longweave(meta, briefs):
@@ -252,7 +296,14 @@ def build_longweave(meta, briefs):
         first = i == 0
         prompt = row["prompt"]
         title = prompt.split("titled '")[1].split("'")[0] if "titled '" in prompt else "untitled"
-        briefs[f"longweave_{n}"] = prompt.strip() + "\n\nWrite the article to article.md."
+        # "Around 2048 words" made the extractor open every run with a
+        # clarification question about what "around" means. The study session
+        # should not start with a question the brief can answer itself.
+        briefs[f"longweave_{n}"] = (
+            prompt.strip() + "\n\nWrite the article to article.md. For the "
+            "target word count, treat \"around 2048 words\" as between 2,000 "
+            "and 2,048 words — text beyond 2,048 words is cut off before "
+            "grading.")
         meta.append(dict(
             id=f"longweave_{n}", n=n, domain="Writing", benchmark="LongWeave",
             label=f"LongWeave {n-4} — {title[:44]}",
@@ -273,7 +324,7 @@ def main():
     meta, briefs = [], {}
     try:
         build_codeif(meta, briefs)
-        build_t2r(meta, briefs)
+        build_dcw(meta, briefs)
         build_longweave(meta, briefs)
     except Exception as e:                                   # noqa: BLE001
         print(f"\nfailed: {type(e).__name__}: {e}", file=sys.stderr)

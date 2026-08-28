@@ -4,10 +4,13 @@ const BASE = '/api/agent';
 // A step is one model call; extraction is one too. Long, but not unbounded —
 // an unbounded wait is indistinguishable from a dead app.
 const TIMEOUT_MS = 180000;
+// Under the codex engine one /step is a whole agent turn, minutes not seconds.
+// The backend kills a turn at its own timeout; this only has to outlast that.
+const STEP_TIMEOUT_MS = 1200000;
 
-async function post(path, body) {
+async function post(path, body, timeoutMs = TIMEOUT_MS) {
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  const timer = ctrl ? setTimeout(() => ctrl.abort(), TIMEOUT_MS) : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
   let res;
   try {
     res = await fetch(`${BASE}${path}`, {
@@ -17,9 +20,13 @@ async function post(path, body) {
       signal: ctrl ? ctrl.signal : undefined,
     });
   } catch (e) {
-    throw new Error(e.name === 'AbortError'
-      ? `${path} timed out after ${TIMEOUT_MS / 1000}s — is the backend running?`
+    // network: the request may or may not have reached the backend. The app
+    // treats these as weather (reconnect, retry), not as application errors.
+    const err = new Error(e.name === 'AbortError'
+      ? `${path} timed out after ${timeoutMs / 1000}s — is the backend running?`
       : `${path} could not reach the backend (${e.message})`);
+    err.network = true;
+    throw err;
   } finally { if (timer) clearTimeout(timer); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `${res.status} ${path}`);
@@ -28,7 +35,14 @@ async function post(path, body) {
 
 async function get(path, params) {
   const qs = new URLSearchParams(params || {}).toString();
-  const res = await fetch(`${BASE}${path}${qs ? `?${qs}` : ''}`);
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}${qs ? `?${qs}` : ''}`);
+  } catch (e) {
+    const err = new Error(`${path} could not reach the backend (${e.message})`);
+    err.network = true;
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `${res.status} ${path}`);
   return data;
@@ -43,7 +57,8 @@ export const api = {
   commit: (sessionId, requirements, questions, brief) =>
     post('/commit', { sessionId, requirements, questions, brief }),
   message: (sessionId, text, highlights) => post('/message', { sessionId, text, highlights }),
-  step: (sessionId) => post('/step', { sessionId }),
+  step: (sessionId) => post('/step', { sessionId }, STEP_TIMEOUT_MS),
+  pause: (sessionId) => post('/pause', { sessionId }),
   writeFile: (sessionId, path, text) => post('/file', { sessionId, path, text }),
   steer: (sessionId, text, requirementId) => post('/steer', { sessionId, text, requirementId }),
   gate: (sessionId, on) => post('/gate', { sessionId, on }),

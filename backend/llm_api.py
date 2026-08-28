@@ -46,9 +46,10 @@ class _Completions:
       * ``max_tokens`` must be sent as ``max_completion_tokens``;
       * ``temperature`` accepts only its default, so it is dropped -- callers
         asking for 0 do not get deterministic sampling from this model;
-      * function tools are rejected unless ``reasoning_effort`` is "none", so
-        tool-calling steps run without reasoning. Calls with no tools (the
-        requirement extractor and the judge) keep the model's default effort.
+      * every call runs at ``reasoning_effort`` from WEIGHTTEXT_REASONING,
+        default "none" -- the study pins the lowest effort everywhere. Calls
+        WITH tools are forced to "none" regardless: this model rejects
+        function tools at any other effort.
 
     The callers are left alone -- this module is the documented adaptation
     point -- so the translation happens here. Lifting the third restriction
@@ -63,7 +64,11 @@ class _Completions:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         kwargs.pop("temperature", None)  # only the default (1) is supported
         if kwargs.get("tools"):
-            kwargs.setdefault("reasoning_effort", "none")
+            kwargs["reasoning_effort"] = "none"
+        else:
+            kwargs.setdefault(
+                "reasoning_effort",
+                os.environ.get("WEIGHTTEXT_REASONING", "none"))
         return self._inner.create(**kwargs)
 
 

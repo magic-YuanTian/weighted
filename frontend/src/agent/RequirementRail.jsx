@@ -55,7 +55,8 @@ function useTape(snap) {
 const stripFile = (d) => (d || '').replace(/^\[[^\]]+\]\s*/, '');
 
 function statusSentence(r, v) {
-  const detail = stripFile((r.report || {}).detail);
+  // details often arrive with their own full stop — don't print two
+  const detail = stripFile((r.report || {}).detail).replace(/\.+$/, '');
   switch (v) {
     case 'satisfied': return detail ? `Met. ${detail}.` : 'Met.';
     case 'violated': return detail ? `Not met. ${detail}.` : 'Not met.';

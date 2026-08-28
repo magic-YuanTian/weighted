@@ -492,3 +492,16 @@
 .wt4 table.csv td { border-bottom:1px solid var(--line); padding:3px 10px 3px 0; white-space:nowrap; vertical-align:top; }
 .wt4 table.csv tr.hd td { position:sticky; top:0; background:var(--surface); font-weight:600; color:var(--ink); border-bottom:1px solid var(--line-2); }
 .wt4 table.csv td.ln { color:var(--ink-3); text-align:right; padding-right:12px; font-variant-numeric:tabular-nums; user-select:none; }
+
+/* the red banner closes; connection weather is amber and closes itself */
+.wt4 .err { display:flex; align-items:flex-start; gap:8px; }
+.wt4 .err span { flex:1; }
+.wt4 .err .x {
+  background:none; border:none; color:inherit; cursor:pointer;
+  font-size:15px; line-height:1; padding:0 2px; flex:none;
+}
+.wt4 .net {
+  font-size:12.5px; color:#7a5b00; background:#fdf6e0;
+  border:1px solid #eadfb0; border-left-width:3px; border-radius:4px;
+  padding:6px 11px; margin:8px 12px; flex:none;
+}

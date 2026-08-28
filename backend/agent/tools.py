@@ -161,8 +161,12 @@ class Workspace:
         return os.path.join(self.root, name)
 
     def list(self):
+        # AGENTS.md is the codex engine's standing-instruction file and
+        # dotfiles are never deliverables: both are invisible to the checker,
+        # the judge, and the UI file list.
         return sorted(f for f in os.listdir(self.root)
-                      if os.path.isfile(os.path.join(self.root, f)))
+                      if os.path.isfile(os.path.join(self.root, f))
+                      and f != "AGENTS.md" and not f.startswith("."))
 
     def read(self, name):
         p = self.path(name)
@@ -346,7 +350,7 @@ def execute(session, name, args):
             text = ws.read(path)
             if text is None:
                 return (f"no such file: {path}. Files: {', '.join(ws.list()) or 'none'}",
-                        {"ok": False, "kind": "read"})
+                        {"ok": False, "kind": "read", "reason": "missing"})
             lines, _ = _lines(text)
             first, rng = 1, args.get("view_range")
             if isinstance(rng, (list, tuple)) and len(rng) == 2:
@@ -354,13 +358,15 @@ def execute(session, name, args):
                     a, b = int(rng[0]), int(rng[1])
                 except (TypeError, ValueError):
                     return (f"view_range must be two integers, got {rng!r}.",
-                            {"ok": False, "kind": "read", "path": path})
+                            {"ok": False, "kind": "read", "path": path,
+                             "reason": "range"})
                 first = max(1, a)
                 last = len(lines) if b == -1 else min(len(lines), b)
                 if first > len(lines):
                     return (f"view_range starts at {first} but {path} has "
                             f"{len(lines)} lines.",
-                            {"ok": False, "kind": "read", "path": path})
+                            {"ok": False, "kind": "read", "path": path,
+                             "reason": "range"})
                 lines = lines[first - 1:last]
             return _numbered(lines, first)[:MAX_READ], {"ok": True, "kind": "read",
                                                         "path": path}

@@ -7,10 +7,12 @@ stream of patches.
 
 import json
 import os
+import threading
 import traceback
 
 from flask import Blueprint, jsonify, request
 
+from agent import codex
 from agent import extract as extract_mod
 from agent import loop
 from agent import requirements as R
@@ -133,12 +135,22 @@ def create_session():
         return _fail(e)
 
 
+def _can_continue(s):
+    if codex.enabled():
+        return codex.can_continue(s)
+    return s.status not in ("done", "paused")
+
+
 @bp.route("/state", methods=["GET"])
 def state():
     s = sessions.get(request.args.get("sessionId"))
     if s is None:
         return jsonify({"error": "unknown sessionId"}), 404
-    return jsonify(s.snapshot())
+    # canContinue lets a client that lost its /step response mid-turn decide
+    # whether to pick the run back up or leave it finished.
+    snap = s.snapshot()
+    snap["canContinue"] = _can_continue(s)
+    return jsonify(snap)
 
 
 @bp.route("/export", methods=["GET"])
@@ -264,23 +276,113 @@ def message():
         return _fail(e)
 
 
+# One turn per session at a time. A client whose /step response died on the
+# wire retries while the first turn is still running server-side; without the
+# lock that starts a second Codex turn against the same workspace.
+_TURN_LOCKS = {}
+_TURN_LOCKS_GUARD = threading.Lock()
+
+
+def _turn_lock(session_id):
+    with _TURN_LOCKS_GUARD:
+        return _TURN_LOCKS.setdefault(session_id, threading.Lock())
+
+
 @bp.route("/step", methods=["POST"])
 def step():
-    """Plan and take exactly one action."""
+    """One unit of agent work: a single action under the native loop, a whole
+    Codex turn under the codex engine."""
     try:
         s, _ = _session()
-        events = loop.step(s)
-        kinds = {e["type"] for e in events}
-        # The auto-runner stops on anything that wants a human: a paused loop,
-        # a finished task, an error, or the agent replying instead of acting.
-        can_continue = (s.status not in ("done", "paused")
-                        and not (kinds & {"assistant", "error"}))
+        lock = _turn_lock(s.id)
+        if not lock.acquire(blocking=False):
+            # A turn is already in flight (a retry after a dropped connection,
+            # or a double click). Report busy; the client polls /state.
+            return jsonify({"events": [], "snapshot": s.snapshot(),
+                            "canContinue": True, "busy": True})
+        try:
+            if codex.enabled():
+                events = codex.run_turn(s)
+                # A Codex turn speaks freely, so an assistant message does not
+                # end the run; only the gate bounce (or a steer) asks for
+                # another turn.
+                can_continue = codex.can_continue(s)
+            else:
+                events = loop.step(s)
+                kinds = {e["type"] for e in events}
+                # The auto-runner stops on anything that wants a human: a
+                # paused loop, a finished task, an error, or the agent replying
+                # instead of acting.
+                can_continue = (s.status not in ("done", "paused")
+                                and not (kinds & {"assistant", "error"}))
+        finally:
+            lock.release()
         return jsonify({"events": events, "snapshot": s.snapshot(),
                         "canContinue": can_continue})
     except LookupError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:                                    # noqa: BLE001
         return _fail(e)
+
+
+@bp.route("/pause", methods=["POST"])
+def pause():
+    """Stop the running turn NOW. Under codex a step is a whole multi-minute
+    turn, so 'stop before the next step' reads as a dead button; this kills
+    the turn's process instead. Finished items are already absorbed and
+    verified, and Run resumes the same codex thread."""
+    try:
+        s, _ = _session()
+        s._pause_requested = True
+        proc = getattr(s, "_codex_proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+        elif s.status != "running":
+            s._pause_requested = False   # nothing in flight — nothing to stop
+        snap = s.snapshot()
+        snap["canContinue"] = _can_continue(s)
+        return jsonify(snap)
+    except LookupError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:                                    # noqa: BLE001
+        return _fail(e)
+
+
+@bp.route("/check", methods=["GET"])
+def check():
+    """The checker as a URL, for the Codex sandbox to curl. Deterministic
+    checks only — the judge runs at end of turn, where the gate needs it.
+    Returns plain text: this is the observation the agent reads."""
+    from flask import Response
+    s = sessions.get(request.args.get("sessionId"))
+    if s is None:
+        return Response("unknown sessionId", status=404, mimetype="text/plain")
+    try:
+        before = {r["id"]: (r.get("report") or {}).get("verdict")
+                  for r in s.requirements}
+        reports = verifier.verify(s, judge_pass=False)
+        R.apply_report(s.requirements, reports)
+        # Stash the flips so the step event for this curl can wear the chips.
+        s._check_chips = [
+            {"id": r["id"], "verdict": (r.get("report") or {}).get("verdict"),
+             "from": before.get(r["id"]), "weight": r.get("weight", 1)}
+            for r in s.requirements
+            if r.get("status") == "active"
+            and (r.get("report") or {}).get("verdict") != before.get(r["id"])]
+        s.save()
+        text = verifier.report_text(s.requirements)
+        # A judge-verified requirement goes STALE the moment its text changes
+        # and this endpoint cannot re-judge it. Without this line the agent
+        # treats STALE as an error and retries the check in a loop.
+        if any((r.get("report") or {}).get("verdict") == "stale"
+               and r.get("verify") == "judge" for r in s.requirements):
+            text += ("\n\nSTALE means the text changed after the last "
+                     "judgement. It is re-judged automatically when you stop "
+                     "— fix FAIL lines, ignore STALE ones, and stop.")
+        return Response(text, mimetype="text/plain")
+    except Exception as e:                                    # noqa: BLE001
+        return Response(f"check failed: {type(e).__name__}: {e}",
+                        status=500, mimetype="text/plain")
 
 
 @bp.route("/file", methods=["POST"])
@@ -405,7 +507,17 @@ def requirement():
         elif action == "update":
             raw = data.get("requirement") or {}
             merged = R.normalize({**target, **raw, "id": rid})
-            merged["report"] = target.get("report")
+            # An edited requirement is a different requirement: its old
+            # verdict was computed against the old text/type/params, and the
+            # verifier deliberately re-judges only when the *document* moves.
+            # Clear the verdict and the scope hash so the next pass checks it
+            # fresh, keeping only the user's override.
+            old_report = target.get("report") or {}
+            merged["report"] = {"verdict": "unverified",
+                                "detail": "edited — not re-checked yet",
+                                "evidence": [], "checkedAtStep": None,
+                                "confidence": None, "scopeHash": None,
+                                "override": old_report.get("override")}
             s.requirements = [merged if r["id"] == rid else r for r in s.requirements]
             s.log("requirement", action="update", requirementId=rid, payload=raw)
         else:

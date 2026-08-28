@@ -33,9 +33,15 @@ Extract the requirements. Rules:
   cannot state as a testable property of the finished text or of the process.
 - Use the most checkable `type` available:
     length           params {{"min": int, "max": int, "unit": "words"}}
+                     (ONLY for the whole deliverable's word count. A limit on
+                     lines, characters-per-line, sentences or paragraphs is
+                     NOT length — that is `tone`, judged by reading.)
     lexical-ban      params {{"phrases": ["...", "..."]}}
     lexical-require  params {{"phrases": ["..."]}}
-    preserve         params {{"phrases": ["..."]}}   (text that must not change)
+    preserve         params {{"phrases": ["..."]}}   (ONLY for literal passages,
+                     quoted verbatim, that must survive in the deliverable's
+                     text. Keeping a source's rows, columns, structure or
+                     order intact is NOT preserve — that is `content`.)
     structure        params {{"pattern": "<python regex>"}}  ONLY for a literal
                      formatting marker that must appear, like a "Subject:" line
                      or a heading. Never write a regex for "the text must talk

@@ -8,6 +8,7 @@ record, written to runs/<id>/session.json after every step.
 
 import json
 import os
+import re
 import time
 import uuid
 
@@ -37,6 +38,8 @@ class Session:
         self.status = "idle"          # idle | running | paused | done
         self.gate_on = True
         self.pending_steer = None
+        self.pending_gate = None      # codex engine: queued FINISH REJECTED text
+        self.codex_thread_id = None   # codex engine: thread to resume
         self.questions = []
         self.unmapped = []
         self.created = time.time()
@@ -74,6 +77,7 @@ class Session:
         with open(os.path.join(self.root, "session.json"), "w", encoding="utf-8") as fh:
             json.dump({
                 "sessionId": self.id, "brief": self.brief, "created": self.created,
+                "codexThreadId": self.codex_thread_id,
                 "status": self.status, "stepCount": self.step_count,
                 "requirements": self.requirements, "events": self.events,
                 "questions": self.questions,
@@ -91,7 +95,43 @@ def create(brief=""):
 
 
 def get(session_id):
-    return _SESSIONS.get(session_id)
+    s = _SESSIONS.get(session_id)
+    if s is not None:
+        return s
+    return _load(session_id)
+
+
+def _load(session_id):
+    """Restore a session from runs/<id>/session.json after a server restart.
+
+    Everything the codex engine needs survives on disk — brief, requirements,
+    events, the thread id to resume. The native loop's llm_messages do not,
+    so a restored session continues cleanly under codex and starts from a
+    condensed history under the native loop."""
+    if not session_id or not re.fullmatch(r"[0-9a-f]{12}", session_id):
+        return None
+    path = os.path.join(RUNS_DIR, session_id, "session.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        s = Session(brief=data.get("brief", ""), session_id=session_id)
+        s.requirements = data.get("requirements") or []
+        s.events = data.get("events") or []
+        s.questions = data.get("questions") or []
+        s.step_count = data.get("stepCount", 0)
+        s.status = data.get("status", "idle")
+        if s.status == "running":       # the turn died with the old server
+            s.status = "idle"
+        s.codex_thread_id = data.get("codexThreadId")
+        s.created = data.get("created", s.created)
+        _SESSIONS[session_id] = s
+        print(f"[session] restored {session_id} from disk", flush=True)
+        return s
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[session] could not restore {session_id}: {e}", flush=True)
+        return None
 
 
 def all_sessions():
