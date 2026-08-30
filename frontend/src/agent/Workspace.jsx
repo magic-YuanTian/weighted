@@ -1,13 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { isDelimited, parseDelimited, sepFor, shapeTable, writeField } from './delimited';
 
 const words = (t) => (t || '').split(/\s+/).filter(Boolean).length;
 
 /* Prose gets the serif; a source file gets a code face. Getting this wrong
-   makes indentation invisible, which is most of what reading code is -- and a
-   delimited table is the same argument in the other axis: cleaned.csv set in a
-   proportional serif has no columns at all, only commas. The workspace stays
-   text either way, because it is typed into directly; the read-only attachment
-   sheet is where a CSV gets drawn as a real table. */
+   makes indentation invisible, which is most of what reading code is.
+
+   A delimited file is not either one: cleaned.csv is a table, and a table read
+   as lines of commas is a table nobody can read a column out of -- monospace
+   only lines the commas up, not the fields between them. So a CSV is drawn as
+   a real table here too, and stays editable, cell by cell. Text is one click
+   away for the edits a grid has no gesture for: a new row, a moved column. */
 const CODE_EXT = /\.(py|js|jsx|ts|tsx|java|go|rb|rs|c|h|cpp|cc|hpp|cs|php|sh|sql|json|ya?ml|toml|ini|css|html?|xml|r|swift|kt|scala|pl|lua|csv|tsv)$/i;
 const isCode = (path) => CODE_EXT.test(path || '');
 const PERSISTENT = new Set(['violated', 'partial', 'stale', 'frozen']);
@@ -125,14 +128,173 @@ const FileText = React.memo(function FileText({ path, text, decorations, hitKey,
   );
 });
 
+/* A page at a time. The shipped tables run to 414 rows and a run replaces the
+   snapshot on every step, so the whole grid is a few thousand cells React
+   would reconcile again on each one. The agent still reads the file whole. */
+const CSV_PAGE = 200;
+
+/* Which decoration, if any, lands on this cell. Evidence is character offsets
+   into the file, so a span is matched against the span the field occupied in
+   the source — the cell is the smallest thing a table can underline. */
+function markFor(decorations, cell) {
+  if (!cell || !decorations) return null;
+  for (let i = 0; i < decorations.length; i += 1) {
+    const d = decorations[i];
+    if (d.start < cell.end && d.end > cell.start) return d;
+  }
+  return null;
+}
+
+function Cell({ tag: Tag, cell, numeric, mark, hitKey, onPick, onFocus, onCommit }) {
+  const key = mark ? `${mark.reqId}:${mark.start}` : null;
+  const cls = [
+    numeric ? 'num' : '',
+    cell ? '' : 'pad',
+    mark ? 'mark' : '',
+    mark && hitKey === key ? 'hit' : '',
+  ].filter(Boolean).join(' ');
+  return (
+    <Tag
+      className={cls}
+      data-v={mark ? mark.verdict : undefined}
+      data-mark={key || undefined}
+      data-req={mark ? mark.reqId : undefined}
+      title={mark ? `${mark.reqId} · ${mark.verdict}` : undefined}
+      contentEditable={!!cell}
+      suppressContentEditableWarning
+      spellCheck={false}
+      onFocus={onFocus}
+      onBlur={(e) => onCommit(cell, e.currentTarget.textContent || '')}
+      /* Enter commits the cell rather than opening a second line inside it —
+         a field that spans two lines is a quoted newline, not a keystroke.
+         Escape puts the cell back the way the file has it. */
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.currentTarget.textContent = cell ? cell.v : '';
+          e.currentTarget.blur();
+        }
+      }}
+      onClick={() => { if (mark) onPick(mark.reqId); }}
+    >
+      {cell ? cell.v : ''}
+    </Tag>
+  );
+}
+
+/* The same surface as FileText, in two dimensions: always editable, always
+   decorated, never a mode. A committed cell is spliced back at that field's
+   own offsets, so the other rows, the line endings and the quoting the file
+   arrived with survive an edit untouched — the agent reads this file again,
+   and a diff nobody made is a diff it has to explain.
+
+   The contract with React is FileText's, one level down. `draft` is our own
+   text, ahead of the server, and it always wins: it is what keeps the offsets
+   of the next cell correct when two cells are edited before the save lands.
+   A server update while a cell has focus is held back instead, because that
+   is the one repaint that would eat keystrokes mid-word. */
+const CsvTable = React.memo(function CsvTable({ path, text, decorations, hitKey, onPick, onSave }) {
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const [shown, setShown] = useState(CSV_PAGE);
+  const held = useRef(text);
+
+  // The server is authoritative once it has spoken: its echo of our own save
+  // and a write by the agent both retire the draft.
+  useEffect(() => { setDraft(null); }, [text]);
+
+  const source = draft !== null ? draft : text;
+  const live = focused && draft === null ? held.current : source;
+  held.current = live;
+
+  const sep = sepFor(path);
+  const table = useMemo(() => shapeTable(live, sep), [live, sep]);
+
+  if (!table) return null;
+
+  const commit = (cell, next) => {
+    setFocused(false);
+    if (!cell || next === cell.v) return;
+    const out = writeField(table.text, cell, next, sep);
+    setDraft(out);
+    onSave(path, out);
+  };
+  const focus = () => setFocused(true);
+  const rows = table.body.slice(0, shown);
+  const hidden = table.body.length - rows.length;
+
+  return (
+    <>
+      <div className="csvwrap">
+        <table className="csv" data-path={path}>
+          <thead>
+            <tr>
+              <th className="ln" scope="col" />
+              {table.head.map((c, j) => (
+                <Cell
+                  key={j} tag="th" cell={c} numeric={table.numeric[j]}
+                  mark={markFor(decorations, c)} hitKey={hitKey}
+                  onPick={onPick} onFocus={focus} onCommit={commit}
+                />
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i}>
+                <td className="ln">{i + 1}</td>
+                {row.map((c, j) => (
+                  <Cell
+                    key={j} tag="td" cell={c} numeric={table.numeric[j]}
+                    mark={markFor(decorations, c)} hitKey={hitKey}
+                    onPick={onPick} onFocus={focus} onCommit={commit}
+                  />
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {hidden > 0 && (
+        <p className="csvmore">
+          {hidden.toLocaleString()} more rows not shown.{' '}
+          <button className="linkbtn" onClick={() => setShown((n) => n + CSV_PAGE * 4)}>
+            show more
+          </button>
+        </p>
+      )}
+    </>
+  );
+});
+
+
 export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze, onAnchor, onSave }) {
-  const files = (snap && snap.files) || [];
+  // memoised for the shape pass below: a fresh [] each render re-parses every file
+  const files = useMemo(() => (snap && snap.files) || [], [snap]);
   const { byFile, scopes } = useDecorations(snap && snap.requirements, selected);
   const [hitKey, setHitKey] = useState(null);
   const [sel, setSel] = useState(null);       // {text, file, x, y}
   const [anchor, setAnchor] = useState(null); // {kind, text, file}
   const [instruction, setInstruction] = useState('');
+  const [asText, setAsText] = useState({});   // per file: the grid, or the raw text
   const scrollRef = useRef(null);
+
+  /* The header count tells the truth about a delimited file: rows and columns.
+     A line count is the wrong unit for a file whose fields may hold newlines,
+     and it counts the header row as data. */
+  const shapes = useMemo(() => {
+    const out = {};
+    files.forEach((f) => {
+      if (!isDelimited(f.path)) return;
+      const rows = parseDelimited(f.text || '', sepFor(f.path));
+      out[f.path] = {
+        rows: Math.max(0, rows.length - 1),
+        cols: rows.reduce((w, r) => Math.max(w, r.length), 0),
+      };
+    });
+    return out;
+  }, [files]);
 
   useEffect(() => {
     if (!focus || focus.kind !== 'artifact') return;
@@ -243,31 +405,60 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
           </div>
         ) : (
           <div className="doc">
-            {files.map((f) => (
-              <div
-                key={f.path}
-                className={`sec ${isCode(f.path) ? 'codesec' : ''} `
-                  + `${scopes[f.path] ? `scope-${scopes[f.path]}` : ''}`}
-                data-file={f.path}
-              >
-                <h2>
-                  {f.path}
-                  <span className="count">
-                    {isCode(f.path)
-                      ? `${(f.text || '').split('\n').length} lines`
-                      : `${words(f.text)} words`}
-                  </span>
-                </h2>
-                <FileText
-                  path={f.path}
-                  text={f.text || ''}
-                  decorations={byFile[f.path]}
-                  hitKey={hitKey}
-                  onPick={onSelectReq}
-                  onSave={onSave}
-                />
-              </div>
-            ))}
+            {files.map((f) => {
+              const shape = shapes[f.path];
+              // an empty file has no columns to draw: it stays text until it has some
+              const grid = !asText[f.path] && shape && shape.cols > 0;
+              return (
+                <div
+                  key={f.path}
+                  className={`sec ${isCode(f.path) ? 'codesec' : ''} `
+                    + `${scopes[f.path] ? `scope-${scopes[f.path]}` : ''}`}
+                  data-file={f.path}
+                >
+                  <h2>
+                    {f.path}
+                    <span className="count">
+                      {grid
+                        ? `${shape.rows.toLocaleString()} rows · ${shape.cols} cols`
+                        : (isCode(f.path)
+                          ? `${(f.text || '').split('\n').length} lines`
+                          : `${words(f.text)} words`)}
+                    </span>
+                    {isDelimited(f.path) && (
+                      <button
+                        className="linkbtn viewtoggle"
+                        title={grid
+                          ? 'edit the raw file — for a new row or a moved column'
+                          : 'back to the table'}
+                        onClick={() => setAsText((m) => ({ ...m, [f.path]: !m[f.path] }))}
+                      >
+                        {grid ? 'text' : 'table'}
+                      </button>
+                    )}
+                  </h2>
+                  {grid ? (
+                    <CsvTable
+                      path={f.path}
+                      text={f.text || ''}
+                      decorations={byFile[f.path]}
+                      hitKey={hitKey}
+                      onPick={onSelectReq}
+                      onSave={onSave}
+                    />
+                  ) : (
+                    <FileText
+                      path={f.path}
+                      text={f.text || ''}
+                      decorations={byFile[f.path]}
+                      hitKey={hitKey}
+                      onPick={onSelectReq}
+                      onSave={onSave}
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

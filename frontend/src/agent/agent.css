@@ -504,8 +504,11 @@
   position:sticky; top:0; z-index:2; background:var(--surface-2);
   font-weight:600; color:var(--ink); border-bottom:1px solid var(--line-2);
 }
-.wt4 table.csv tbody tr:nth-child(even) td { background:var(--ground); }
-.wt4 table.csv tbody tr:hover td { background:var(--accent-soft); }
+/* :not(.mark) — the zebra is more specific than the verdict colours, so
+   without it a violated cell loses its underline background on every other
+   row, which is the one row you most need to see it on. */
+.wt4 table.csv tbody tr:nth-child(even) td:not(.mark) { background:var(--ground); }
+.wt4 table.csv tbody tr:hover td:not(.mark) { background:var(--accent-soft); }
 /* The row number holds its column: hos_data is twelve columns of addresses and
    scrolling right to read one loses which row you are on. */
 .wt4 table.csv .ln {
@@ -518,6 +521,26 @@
 .wt4 table.csv tbody tr:nth-child(even) .ln { background:var(--ground); }
 .wt4 table.csv tbody tr:hover .ln { background:var(--accent-soft); }
 .wt4 table.csv .num { text-align:right; font-variant-numeric:tabular-nums; }
+
+/* ---- the same table in the workspace, where the cells are typed into ---- */
+/* Its own scroll box: twelve columns of addresses must not push the whole
+   pane sideways, and a sticky header only sticks to the nearest scroller. */
+.wt4 .doc .csvwrap {
+  overflow:auto; overscroll-behavior-x:contain; max-height:62vh;
+  background:var(--surface-2); border:1px solid var(--line); border-radius:4px;
+}
+.wt4 .doc table.csv { width:100%; }
+.wt4 .doc table.csv .ln, .wt4 .doc table.csv thead th { background:var(--surface-2); }
+.wt4 .doc table.csv td[contenteditable="true"]:focus,
+.wt4 .doc table.csv th[contenteditable="true"]:focus {
+  outline:none; background:var(--surface);
+  box-shadow:inset 0 0 0 2px var(--accent); caret-color:var(--accent);
+}
+/* a cell no row of the file reaches — padding, not an empty field */
+.wt4 .doc table.csv .pad { background:repeating-linear-gradient(
+  -45deg, transparent 0 5px, var(--line) 5px 6px); }
+.wt4 .doc .csvmore { font-family:var(--mono); font-size:11px; color:var(--ink-3); margin:6px 0 0; }
+.wt4 .doc h2 .viewtoggle { margin-left:auto; }
 
 /* the red banner closes; connection weather is amber and closes itself */
 .wt4 .err { display:flex; align-items:flex-start; gap:8px; }

@@ -169,6 +169,55 @@ test('selecting text in the workspace offers freeze, replace and insert', async 
   window.getSelection = realGetSelection;
 });
 
+/* A CSV is the deliverable on the wrangling tasks, and its defects are
+   positional: a comma inside a field, spaces around a value. Read as lines it
+   shows neither, so the workspace draws it as a table -- and an edit there has
+   to come back as the file, not as a re-typed line. */
+const CSV_SNAP = {
+  ...RUNNING,
+  files: [{ path: 'cleaned.csv', text: 'name,city\r\n"Doe, Jane",  MOBILE  \r\nAmy,ERIE\r\n' }],
+};
+
+test('a CSV in the workspace is a table, edited cell by cell', async () => {
+  global.fetch = jest.fn((url) => {
+    if (url.includes('/session')) return body(EMPTY);
+    if (url.includes('/step')) return body({ events: [], snapshot: CSV_SNAP, canContinue: false });
+    return body(CSV_SNAP);
+  });
+  await startSession();
+  await screen.findByText('Cover letter is 350-500 words');
+
+  const table = await waitFor(() => {
+    const t = document.querySelector('table.csv');
+    expect(t).not.toBeNull();
+    return t;
+  });
+  expect(screen.getByText('2 rows · 2 cols')).toBeInTheDocument();
+  expect([...table.querySelectorAll('thead th')].map((c) => c.textContent))
+    .toEqual(['', 'name', 'city']);
+
+  // the quoted comma stays inside one cell; the dirty spaces stay visible
+  const row = table.querySelectorAll('tbody tr')[0];
+  expect([...row.querySelectorAll('td')].map((c) => c.textContent))
+    .toEqual(['1', 'Doe, Jane', '  MOBILE  ']);
+
+  const cell = row.querySelectorAll('td')[2];
+  expect(cell.getAttribute('contenteditable')).toBe('true');
+  cell.textContent = 'Mobile';
+  fireEvent.blur(cell);
+
+  // one field is spliced back at its own offsets: the quoting and the CRLFs
+  // of every other row are untouched
+  await waitFor(() => {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/file'));
+    expect(call).toBeTruthy();
+    expect(JSON.parse(call[1].body)).toMatchObject({
+      path: 'cleaned.csv',
+      text: 'name,city\r\n"Doe, Jane",Mobile\r\nAmy,ERIE\r\n',
+    });
+  });
+});
+
 test('the context inspector shows the exact reminder text that gets injected', async () => {
   window.location.hash = '#agent/dev';   // researcher tool, not on the study screen
   await startSession();

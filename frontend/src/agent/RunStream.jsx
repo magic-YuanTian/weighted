@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PILOT } from './pilot';
 import api from './api';
+import { isDelimited, sepFor, shapeTable } from './delimited';
 
 const DEV = window.location.hash.includes('dev');
 
@@ -31,8 +32,9 @@ function describeStep(ev) {
     }
     /* A failed shell command is routine agent work, not an app problem —
        "Something went wrong" reads as the latter. Name what happened; the
-       output is one click away in the expanded step. */
-    if (ev.action === 'command') {
+       output is one click away in the expanded step. ('command' is what the
+       old engine logged; sessions recorded under it still replay.) */
+    if (ev.action === 'run_command' || ev.action === 'command') {
       const cmd = (ev.argSummary || '').trim();
       return cmd ? `Ran: ${cmd} — it failed` : 'A command failed';
     }
@@ -45,6 +47,7 @@ function describeStep(ev) {
     case 'insert_file': return `Added to ${f}`;
     case 'read_file': return `Read ${f}`;
     case 'list_files': return 'Looked over the files';
+    case 'run_command':
     case 'command': {
       const cmd = (ev.argSummary || '').trim();
       return cmd ? `Ran: ${cmd}` : 'Ran a command';
@@ -158,55 +161,6 @@ const PromptText = React.memo(function PromptText({ text, reqs, selected, onSele
    each time. The agent still reads the file whole. */
 const PAGE = 120;
 
-/* RFC 4180, not split(','). A quoted field keeps its commas and its newlines
-   and "" is one literal quote; splitting on every comma shifts every column to
-   the right of the first quoted field — silently, and only on some files. */
-function parseDelimited(text, sep) {
-  const rows = [];
-  let row = [];
-  let field = '';
-  let quoted = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch !== '"') { field += ch; continue; }
-      if (text[i + 1] === '"') { field += '"'; i += 1; continue; }
-      quoted = false;
-      continue;
-    }
-    if (ch === '"' && field === '') { quoted = true; continue; }
-    if (ch === sep) { row.push(field); field = ''; continue; }
-    if (ch === '\r') continue;
-    if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; continue; }
-    field += ch;
-  }
-  // A file that ends in a newline has already closed its last row. Pushing
-  // here unconditionally is what hangs a phantom empty row under every table.
-  if (field !== '' || row.length) { row.push(field); rows.push(row); }
-  return rows;
-}
-
-/* A column of numbers reads as a column only when the digits line up, so the
-   alignment is decided per column over the whole file, never per cell: one
-   right-aligned value in a column of left-aligned ones is worse than neither. */
-const _NUM = /^-?\$?[\d,]*\.?\d+%?$/;
-
-function numericColumns(rows, width) {
-  const out = [];
-  for (let c = 0; c < width; c += 1) {
-    let seen = 0;
-    let numeric = 0;
-    for (let r = 0; r < rows.length; r += 1) {
-      const v = (rows[r][c] || '').trim();
-      if (!v) continue;
-      seen += 1;
-      if (_NUM.test(v)) numeric += 1;
-    }
-    out.push(seen > 0 && seen === numeric);
-  }
-  return out;
-}
-
 const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name, onClose }) {
   const [text, setText] = useState(null);
   const [err, setErr] = useState('');
@@ -229,20 +183,12 @@ const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name,
     return () => window.removeEventListener('keydown', esc);
   }, [onClose]);
 
-  const isCsv = /\.(csv|tsv)$/i.test(name);
+  const isCsv = isDelimited(name);
   /* Parsed once per file, not once per parent render. */
-  const table = useMemo(() => {
-    if (!isCsv || text === null) return null;
-    const rows = parseDelimited(text, /\.tsv$/i.test(name) ? '\t' : ',');
-    if (!rows.length) return null;
-    const width = rows.reduce((w, r) => Math.max(w, r.length), 0);
-    // A short row is padded rather than left short, so a ragged file cannot
-    // slide the columns under the wrong heading. The padding is empty cells,
-    // which is what a missing field is.
-    const pad = (r) => (r.length === width ? r : r.concat(Array(width - r.length).fill('')));
-    const body = rows.slice(1).map(pad);
-    return { head: pad(rows[0]), body, width, numeric: numericColumns(body, width) };
-  }, [text, isCsv, name]);
+  const table = useMemo(
+    () => (isCsv && text !== null ? shapeTable(text, sepFor(name)) : null),
+    [text, isCsv, name],
+  );
 
   const lines = useMemo(() => (text || '').split('\n'), [text]);
   const hidden = table ? Math.max(0, table.body.length - shown) : 0;
@@ -271,7 +217,9 @@ const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name,
                 <tr>
                   <th className="ln" scope="col" />
                   {table.head.map((c, j) => (
-                    <th key={j} scope="col" className={table.numeric[j] ? 'num' : ''}>{c}</th>
+                    <th key={j} scope="col" className={table.numeric[j] ? 'num' : ''}>
+                      {c ? c.v : ''}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -280,7 +228,7 @@ const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name,
                   <tr key={i}>
                     <td className="ln">{i + 1}</td>
                     {row.map((c, j) => (
-                      <td key={j} className={table.numeric[j] ? 'num' : ''}>{c}</td>
+                      <td key={j} className={table.numeric[j] ? 'num' : ''}>{c ? c.v : ''}</td>
                     ))}
                   </tr>
                 ))}
