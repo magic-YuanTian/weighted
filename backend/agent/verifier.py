@@ -15,6 +15,7 @@ import hashlib
 import re
 
 import checker  # v3 Tier-1 checks, reused as-is
+import code_checker  # Tier-1 for Python deliverables
 from . import llm
 from . import requirements as R
 
@@ -43,6 +44,10 @@ def _kin(a, b):
 _CODE_EXT = re.compile(
     r"\.(py|pyi|js|jsx|mjs|cjs|ts|tsx|java|kt|scala|go|rs|rb|php|swift|"
     r"c|h|cc|cpp|hpp|cs|sh|sql|r|m)$", re.I)
+
+# The AST checker parses Python and only Python. A brief in another language
+# keeps its constraints on the judge, which is worse but honest.
+_PY_EXT = re.compile(r"\.pyi?$", re.I)
 
 # A named definition, in the shape the languages this agent writes use.
 _DEF_RE = re.compile(
@@ -229,6 +234,51 @@ def _artifact_evidence(doc, locations, limit=6):
     return out
 
 
+def _check_code_prop(req, doc, scope_range):
+    """Dispatch to the AST checker, per Python file the scope covers.
+
+    Per file, not over the scope text: a global scope is every workspace file
+    concatenated, and two Python files run together do not parse. Each file is
+    checked on its own and the verdicts are combined — any violation carries.
+    """
+    start, end = scope_range
+    params = req.get("params") or {}
+    targets = [f for f in doc["files"]
+               if f["start"] < end and f["end"] > start
+               and _PY_EXT.search(f["file"])]
+    if not targets:
+        return "unverified", "no Python file in scope yet", []
+
+    verdicts, details, locs = [], [], []
+    for f in targets:
+        source = doc["text"][f["start"]:f["end"]]
+        verdict, detail, spans = code_checker.check(
+            params.get("prop"), params, source)
+        verdicts.append(verdict)
+        if detail:
+            # Named here, not by verify()'s generic prefix: that one labels a
+            # verdict with whichever file the *scope* starts in, which for a
+            # global scope over several files is simply the first one — the
+            # wrong name on a violation found in the third.
+            details.append(f"[{f['file']}] {detail}")
+        locs.extend({"start": f["start"] + a, "end": f["start"] + b,
+                     "text": doc["text"][f["start"] + a:f["start"] + b]}
+                    for a, b in spans)
+
+    if "violated" in verdicts:
+        verdict = "violated"
+    elif all(v == "unverified" for v in verdicts):
+        verdict = "unverified"
+    else:
+        verdict = "satisfied"
+    # A violation names every file that caused it; a pass over a dozen files
+    # does not need a dozen sentences saying so.
+    if verdict != "violated":
+        shown, rest = details[:2], len(details) - 2
+        details = shown + ([f"and {rest} more file(s)"] if rest > 0 else [])
+    return verdict, "; ".join(details), _artifact_evidence(doc, locs)
+
+
 def _check_code(req, doc, scope_range):
     """Dispatch to the v3 checker. Adds `partial`, which v3 has no need for:
     a multi-phrase preserve requirement can be three-quarters kept, and
@@ -236,6 +286,8 @@ def _check_code(req, doc, scope_range):
     start, end = scope_range
     scope_text = doc["text"][start:end]
     rtype = req["type"]
+    if rtype == "code-prop":
+        return _check_code_prop(req, doc, scope_range)
     shim = dict(req)
     if rtype == "preserve":
         shim["type"] = "lexical-require"
@@ -569,7 +621,8 @@ def verify(session, judge_pass=False, **kw):
         # Say which text was measured. "412 words" is not a finding until the
         # user knows which file it counted.
         where = locate(doc, rng[0], rng[1])["file"]
-        if where and verdict != "unverified" and detail:
+        if where and verdict != "unverified" and detail \
+                and req.get("type") != "code-prop":   # names its own files
             detail = f"[{where}] {detail}"
 
         # A length verdict has no phrase to point at. Give it the scope itself

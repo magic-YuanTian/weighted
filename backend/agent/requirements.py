@@ -16,6 +16,8 @@ mechanism elsewhere:
 import copy
 import re
 
+import code_checker  # what the AST checker can and cannot answer
+
 # type -> (kind, default verification mode)
 TYPE_ROUTING = {
     "length":          ("artifact", "code"),
@@ -23,6 +25,7 @@ TYPE_ROUTING = {
     "lexical-require": ("artifact", "code"),
     "preserve":        ("artifact", "code"),
     "structure":       ("artifact", "code"),
+    "code-prop":       ("artifact", "code"),
     "content":         ("artifact", "judge"),
     "tone":            ("artifact", "judge"),
     "custom":          ("artifact", "judge"),
@@ -63,6 +66,17 @@ def normalize(raw, index=0):
     # drop it out of the loop; a judge can at least answer.
     if rtype == "structure" and verify == "code" and not params.get("pattern") \
             and "subject" not in (r.get("text") or "").lower():
+        verify = "judge"
+    # And a code-prop is only code-checkable if the AST checker can actually
+    # answer it: the property has to exist and its parameters have to be there.
+    # The extractor reaches for the type on constraints it has no property for
+    # ("return a float", "use signal as the input variable") and fills in
+    # half-parameters for ones it does ({"prop": "forbids_names", "names": []}).
+    # Routed to `code` those sit at "unverified" for the whole run, and nothing
+    # blocks the finish gate on unverified — so the run ends green with them
+    # never checked, which is the one outcome this app exists to prevent.
+    if rtype == "code-prop" and verify == "code" \
+            and not code_checker.usable(params.get("prop"), params):
         verify = "judge"
 
     return {

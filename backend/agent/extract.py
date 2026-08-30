@@ -35,7 +35,8 @@ Extract the requirements. Rules:
     length           params {{"min": int, "max": int, "unit": "words"}}
                      (ONLY for the whole deliverable's word count. A limit on
                      lines, characters-per-line, sentences or paragraphs is
-                     NOT length — that is `tone`, judged by reading.)
+                     NOT length — in prose that is `tone`, judged by reading;
+                     in code it is `code-prop`, which counts them exactly.)
     lexical-ban      params {{"phrases": ["...", "..."]}}
     lexical-require  params {{"phrases": ["..."]}}
     preserve         params {{"phrases": ["..."]}}   (ONLY for literal passages,
@@ -46,7 +47,41 @@ Extract the requirements. Rules:
                      formatting marker that must appear, like a "Subject:" line
                      or a heading. Never write a regex for "the text must talk
                      about X" — that is a `content` requirement.
-    content          a claim about what the text must say   (judged)
+    code-prop        params {{"prop": "<one of the below>", ...}}  a property of
+                     PYTHON source a parser can settle. Use it for EVERY code
+                     constraint in this list — a judge reading code guesses,
+                     and guesses wrong about exactly these. One property per
+                     requirement; split a sentence that states two.
+                       naming        {{"kind":"variable"|"function"|"class",
+                                      "convention":"snake_case"|"CamelCase"|"UPPER_SNAKE"}}
+                                     (kind is exactly what the brief says. A rule
+                                      about VARIABLE names says nothing about a
+                                      class name, and vice versa.)
+                       defines       {{"kind":"function"|"class"|"variable","name":"..."}}
+                       imports       {{"module":"numpy"}}
+                       assigned_once {{"name":"max_freq"}}   ("is a constant")
+                       module_level  {{"name":"max_freq"}}   ("is a global variable")
+                       initializes   {{"name":"obj","call":"MyClass","arg":"signal"}}
+                       uses          {{"construct":"for"|"while"|"if"|"return"|"list"|
+                                      "listcomp"|"comprehension"|"not"|"class"|"lambda"|
+                                      "try"|"with"|"yield"|"raise"|"global"}}
+                       forbids       {{"construct": one of the same}}
+                       forbids_names {{"names":["deque","handle_message"]}}
+                       single_return {{}}      (one return per value-returning function)
+                       max_function_lines {{"max": 8}}
+                       max_line_length    {{"max": 80}}
+                       no_blank_lines_in_body {{}}
+                       docstrings    {{"kind":"function"|"class"|"both"}}
+                                     (presence and one-line-ness ONLY. "the
+                                      docstring must say what it returns" is a
+                                      separate `content` requirement.)
+                       max_classes   {{"max": 2}}
+                     A code constraint none of these fits is `content`,
+                     never a code-prop with no prop: a property the
+                     checker does not have cannot be checked at all.
+    content          a claim about what the text must say, or about what code
+                     MEANS — does it compute the right thing, does a sentence
+                     say what it should                     (judged)
     tone             a claim about how it must read         (judged)
     tool-use         params {{"tool": "run_check", "before": "finish"}}  (about the
                      agent's process, not the text)
