@@ -62,6 +62,28 @@ but **the model must support tool calling** — the agent has no other way to ac
 
 or `npm run build`, after which the backend serves the app on :5091 directly.
 
+### The agent's terminal
+
+The agent can run shell commands in its workspace, which is how the data tasks
+get done properly: copy the attached source verbatim, then repair the copy one
+column at a time with a real program, so the parts nobody asked it to change
+stay byte-identical instead of being retyped from memory. Helper scripts belong
+in `$SCRATCH` and the attachments are read-only at `$ATTACHMENTS` — every file
+in the workspace itself is a deliverable and is checked as one.
+
+A shell goes around the tool-level guarantees, so it does not get to keep what
+it wrote unexamined. Every command is bracketed by a workspace snapshot: a file
+that lost a protected phrase is put back — the same contract `edit_file` states
+as a refusal, enforced one moment later because a shell cannot be asked first —
+and whatever stands is verified by the step that ran it, so a `python3` script
+that rewrites a table produces the same chips a hand edit would.
+
+    WEIGHTTEXT_SHELL_TIMEOUT=120   # seconds one command may run (default)
+    WEIGHTTEXT_SHELL=0             # withhold the tool entirely
+
+On by default locally. Off by default as soon as `WEIGHTTEXT_PASSWORD` is set,
+for the reason in the next section; `WEIGHTTEXT_SHELL=1` overrides that.
+
 ### Sharing it with other people
 
 `server.py` serves the built frontend and the API from one port, so a single
@@ -76,6 +98,12 @@ Unset, there is no gate — local development behaves as it always did. Set, the
 whole app answers 401 until the browser sends the password, over HTTP Basic,
 so there is nothing to log into and no session to leak. Anyone with the
 password can spend the key, so treat it as a key.
+
+Setting it also withholds the agent's terminal, because a shell in the
+workspace is a shell on this machine: reachable over a tunnel, with a password
+shared among a few people, it is remote code execution for whoever holds that
+password. The writing tasks do not need it. Turn it back on with
+`WEIGHTTEXT_SHELL=1` only when you know who is on the other end.
 
 On the same network that is already enough: the server binds `0.0.0.0`, so
 others reach it at `http://<your-ip>:5091`. Leaving that network is the access

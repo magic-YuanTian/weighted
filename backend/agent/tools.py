@@ -4,15 +4,38 @@ Tier-0 enforcement lives here (AGENT_UI_DESIGN.md §5): a `preserve` requirement
 with ``enforce: true`` makes the edit tools *refuse* writes that destroy a
 protected phrase. Nothing downstream has to trust the model about it — the tool
 returns a rejection observation and the file is untouched.
+
+`run_command` is the one tool that can write without going through that check —
+a shell redirect goes straight round it — so it does not get to. Every command
+is bracketed by a workspace snapshot and `absorb()` folds whatever it wrote back
+into the same guarantee: a file that lost a protected phrase is put back. The
+contract the edit tools state as "the file is unchanged" is enforced here one
+moment later instead, which is the most a shell allows.
 """
 
 import difflib
 import os
 import re
+import subprocess
 
 from . import requirements as R
 
 MAX_READ = 20000
+MAX_OUTPUT = 6000
+SHELL_TIMEOUT = int(os.environ.get("WEIGHTTEXT_SHELL_TIMEOUT", "120"))
+
+
+def shell_enabled():
+    """A shell in the workspace is a shell on this machine. Local development
+    gets it by default; the moment WEIGHTTEXT_PASSWORD turns the app into
+    something reachable over a tunnel (see the README), the same tool is
+    remote code execution for everyone holding the password, so it goes off
+    unless the operator says otherwise in so many words."""
+    setting = os.environ.get("WEIGHTTEXT_SHELL")
+    if setting is not None:
+        return setting.lower() not in ("0", "false", "no", "off")
+    return not os.environ.get("WEIGHTTEXT_PASSWORD")
+
 
 TOOL_SCHEMAS = [
     {
@@ -121,6 +144,31 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "run_command",
+            "description": (
+                "Run a shell command in the workspace directory. Reach for this when a "
+                "program does the job better than retyping text does: transforming a "
+                "data table, computing a figure you would otherwise estimate, running "
+                "code you just wrote. python3 and the usual text tools are available; "
+                "pandas is not, and for a small table you do not want it — the standard "
+                "library's csv module leaves the columns you were told not to touch "
+                "exactly as they were. $ATTACHMENTS holds the read-only attachments and "
+                "$SCRATCH is where helper scripts and intermediates belong: every file "
+                "in the workspace itself is a deliverable and is checked as one. Make "
+                "one repair per command."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string",
+                                "description": "e.g. cp \"$ATTACHMENTS/sales.csv\" cleaned.csv"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_check",
             "description": ("Run the deterministic requirement checker over the workspace and "
                             "read the report. Costs nothing and never lies — run it before you finish."),
@@ -142,6 +190,16 @@ TOOL_SCHEMAS = [
     },
 ]
 
+
+def schemas():
+    """The tools offered for the next action. A disabled shell is withheld
+    rather than offered and refused — a tool the model can see is a tool it
+    plans around, and it should not plan around one that never works."""
+    if shell_enabled():
+        return TOOL_SCHEMAS
+    return [t for t in TOOL_SCHEMAS if t["function"]["name"] != "run_command"]
+
+
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -161,12 +219,11 @@ class Workspace:
         return os.path.join(self.root, name)
 
     def list(self):
-        # AGENTS.md is the codex engine's standing-instruction file and
-        # dotfiles are never deliverables: both are invisible to the checker,
-        # the judge, and the UI file list.
+        # Dotfiles are never deliverables — a shell leaves them around and the
+        # checker, the judge and the UI file list should all ignore them.
         return sorted(f for f in os.listdir(self.root)
                       if os.path.isfile(os.path.join(self.root, f))
-                      and f != "AGENTS.md" and not f.startswith("."))
+                      and not f.startswith("."))
 
     def read(self, name):
         p = self.path(name)
@@ -181,6 +238,19 @@ class Workspace:
 
     def snapshot(self):
         return {f: self.read(f) for f in self.list()}
+
+    def make_writable(self):
+        """Every file in here must stay ours to edit. A command can leave one
+        that is not: `cp` gives the copy the source's permission bits, and the
+        attachments are deliberately read-only, so the very first move of a
+        wrangling task — copy the source, then repair the copy — otherwise
+        lands a 0444 deliverable and every repair after it dies on
+        PermissionError."""
+        for name in self.list():
+            p = self.path(name)
+            mode = os.stat(p).st_mode & 0o777
+            if not mode & 0o200:
+                os.chmod(p, mode | 0o600)
 
 
 class Attachments:
@@ -214,8 +284,17 @@ class Attachments:
             return fh.read()
 
     def add(self, name, content):
-        with open(self.path(name), "w", encoding="utf-8") as fh:
+        p = self.path(name)
+        if os.path.exists(p):
+            os.chmod(p, 0o644)
+        with open(p, "w", encoding="utf-8") as fh:
             fh.write(content)
+        # Under a sandboxed engine "read-only" was a property of the sandbox.
+        # With a shell running in the workspace next door it has to be a
+        # property of the file: an agent that cleans the table in place rather
+        # than copying it would otherwise destroy the only record of what the
+        # source said, and every later check would compare clean against clean.
+        os.chmod(p, 0o444)
 
     def meta(self):
         out = []
@@ -287,6 +366,13 @@ def word_count(text):
     return len(re.findall(r"\S+", text or ""))
 
 
+def line_count(text):
+    """The last line number insert_file will accept for this text — the same
+    count the tool reports, from the same helper, so the digest and the error
+    message can never disagree about where the end of the file is."""
+    return len(_lines(text)[0])
+
+
 def _diff_stat(before, after):
     b, a = (before or "").splitlines(), (after or "").splitlines()
     add = dele = 0
@@ -305,6 +391,123 @@ def _tier0_violations(session, before, after):
         if phrase and phrase in (before or "") and phrase not in (after or ""):
             lost.append(phrase)
     return lost
+
+
+def absorb(session, before):
+    """Fold whatever a command wrote into the guarantees an edit tool gives.
+
+    `before` is a workspace snapshot taken just before the command ran. Every
+    file that differs from it is either a write that stands or, if it dropped a
+    protected phrase, a write that gets undone — the same contract edit_file
+    states as a refusal, enforced one moment later because a shell cannot be
+    asked first. This is the single funnel for shell writes, so a python script
+    that rewrites a table is checked exactly like a patch would have been.
+
+    Returns (changed, restored): changed is [(name, added, deleted)] for the
+    writes that stood, restored is [(name, [lost phrases])] for the ones undone.
+    """
+    changed, restored = [], []
+    session.workspace.make_writable()
+    present = set(session.workspace.list())
+    for rel in sorted(present | set(before)):
+        after = session.workspace.read(rel) if rel in present else None
+        prior = before.get(rel)
+        if after == prior:
+            continue
+        lost = _tier0_violations(session, prior, after)
+        if lost:
+            if prior is None:
+                try:
+                    os.remove(session.workspace.path(rel))
+                except OSError:
+                    pass
+            else:
+                session.workspace.write(rel, prior)
+            restored.append((rel, lost))
+            continue
+        add, dele = _diff_stat(prior, after)
+        changed.append((rel, add, dele))
+    return changed, restored
+
+
+def _run_command(session, command):
+    """Execute one command in the workspace and report what it did to it."""
+    os.makedirs(session.scratch, exist_ok=True)
+    # The server's own secrets are not the agent's to hold. OPENAI_API_KEY and
+    # WEIGHTTEXT_PASSWORD are both in this process's environment, and a command
+    # output goes into the observation, the event log and session.json — which
+    # is the file the study data gets shared as. Nothing a command needs to do
+    # here wants either of them.
+    env = {k: v for k, v in os.environ.items()
+           if not re.search(r"KEY|TOKEN|SECRET|PASSWORD", k, re.I)}
+    # Named, not spelled out in the prompt: a path the agent has to retype is a
+    # path it eventually retypes wrong, and these two are in every command that
+    # transforms an attached source.
+    env["ATTACHMENTS"] = session.attachments.root
+    env["SCRATCH"] = session.scratch
+    before = session.workspace.snapshot()
+
+    timed_out = False
+    try:
+        proc = subprocess.Popen(command, shell=True, executable="/bin/bash",
+                                cwd=session.workspace.root, env=env,
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace")
+    except OSError as e:
+        return f"could not start the command: {e}", {"ok": False, "kind": "error"}
+
+    # The /pause route kills through this handle, so ⏸ interrupts a command
+    # that is going to run for its whole timeout instead of reading as a dead
+    # button. Cleared in `finally` — a stale handle would have pause killing
+    # whatever process id landed there next.
+    session._proc = proc
+    try:
+        output = proc.communicate(timeout=SHELL_TIMEOUT)[0] or ""
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        output = proc.communicate()[0] or ""
+        code, timed_out = -1, True
+    finally:
+        session._proc = None
+
+    changed, restored = absorb(session, before)
+
+    lines = [f"$ {command}"]
+    if timed_out:
+        lines.append(f"(killed after {SHELL_TIMEOUT}s — it was still running)")
+    else:
+        lines.append(f"(exit {code})")
+    output = output.strip()
+    if len(output) > MAX_OUTPUT:
+        # The head is where a traceback's message and a listing's shape are.
+        # Saying how much was dropped stops the agent reading a cut-off line
+        # as the end of the data.
+        output = (output[:MAX_OUTPUT]
+                  + f"\n[output cut off — {len(output) - MAX_OUTPUT} more characters. "
+                    "Narrow the command, or write the result to a file and read it.]")
+    lines.append(output if output else "(no output)")
+    for rel, lost in restored:
+        quoted = ", ".join(f'"{p}"' for p in lost)
+        lines.append(f"REJECTED by the workspace: the command's change to {rel} "
+                     f"would have removed protected text ({quoted}). "
+                     f"{rel} was put back as it was.")
+    for rel, add, dele in changed:
+        text = session.workspace.read(rel)
+        lines.append(f"deleted {rel}" if text is None else
+                     f"wrote {rel} ({word_count(text)} words, +{add} −{dele})")
+    if not changed and not restored:
+        lines.append("(the workspace is unchanged)")
+
+    meta = {"ok": code == 0 and not restored and not timed_out,
+            "kind": "edit" if changed else "command"}
+    if restored:
+        meta["blocked"] = "tier0"
+    if len(changed) == 1:
+        meta["path"] = changed[0][0]
+    return "\n".join(lines), meta
 
 
 def execute(session, name, args):
@@ -426,6 +629,17 @@ def execute(session, name, args):
             add, dele = _diff_stat(before, after)
             return (f"wrote {path} ({word_count(after)} words, +{add} −{dele})",
                     {"ok": True, "kind": "edit", "path": path, "add": add, "del": dele})
+
+        if name == "run_command":
+            if not shell_enabled():
+                return ("The shell is switched off on this server. Use write_file, "
+                        "edit_file and insert_file instead.",
+                        {"ok": False, "kind": "error"})
+            command = (args.get("command") or "").strip()
+            if not command:
+                return ("run_command needs a command to run.",
+                        {"ok": False, "kind": "error"})
+            return _run_command(session, command)
 
         if name == "run_check":
             from . import verifier

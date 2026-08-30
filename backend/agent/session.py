@@ -31,6 +31,11 @@ class Session:
         # reference material, deliberately outside the workspace so the
         # requirement checker never sees it
         self.attachments = Attachments(os.path.join(self.root, "attachments"))
+        # where run_command's helper scripts and intermediates go. Outside the
+        # workspace for the same reason attachments are: everything inside it
+        # is a deliverable, and a stray clean.py would be checked as one.
+        self.scratch = os.path.join(self.root, "scratch")
+        self._proc = None             # the running run_command, for /pause
         self.requirements = []
         self.events = []
         self.llm_messages = []
@@ -38,8 +43,6 @@ class Session:
         self.status = "idle"          # idle | running | paused | done
         self.gate_on = True
         self.pending_steer = None
-        self.pending_gate = None      # codex engine: queued FINISH REJECTED text
-        self.codex_thread_id = None   # codex engine: thread to resume
         self.questions = []
         self.unmapped = []
         self.created = time.time()
@@ -77,7 +80,6 @@ class Session:
         with open(os.path.join(self.root, "session.json"), "w", encoding="utf-8") as fh:
             json.dump({
                 "sessionId": self.id, "brief": self.brief, "created": self.created,
-                "codexThreadId": self.codex_thread_id,
                 "status": self.status, "stepCount": self.step_count,
                 "requirements": self.requirements, "events": self.events,
                 "questions": self.questions,
@@ -104,10 +106,11 @@ def get(session_id):
 def _load(session_id):
     """Restore a session from runs/<id>/session.json after a server restart.
 
-    Everything the codex engine needs survives on disk — brief, requirements,
-    events, the thread id to resume. The native loop's llm_messages do not,
-    so a restored session continues cleanly under codex and starts from a
-    condensed history under the native loop."""
+    The durable state — brief, requirements, events, the workspace on disk —
+    all comes back. The trajectory does not: llm_messages is a model transcript
+    and is not written out. A restored session therefore resumes from the brief
+    and the workspace as it stands, which is what the agent would re-read
+    anyway; the event log keeps the record of how it got there."""
     if not session_id or not re.fullmatch(r"[0-9a-f]{12}", session_id):
         return None
     path = os.path.join(RUNS_DIR, session_id, "session.json")
@@ -122,9 +125,13 @@ def _load(session_id):
         s.questions = data.get("questions") or []
         s.step_count = data.get("stepCount", 0)
         s.status = data.get("status", "idle")
-        if s.status == "running":       # the turn died with the old server
+        if s.status == "running":       # the step died with the old server
             s.status = "idle"
-        s.codex_thread_id = data.get("codexThreadId")
+        # Without this the next step is a system prompt and nothing else, and
+        # the model answers an empty turn. The brief is the one message that
+        # was always there.
+        if s.brief:
+            s.llm_messages = [{"role": "user", "content": s.brief}]
         s.created = data.get("created", s.created)
         _SESSIONS[session_id] = s
         print(f"[session] restored {session_id} from disk", flush=True)

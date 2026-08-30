@@ -43,7 +43,37 @@ Rules of this workspace:
   in part. Say what you did, not what it says.
 """
 
+# Appended only when the shell is actually on (tools.shell_enabled). Rules for
+# a tool the model has not been given are worse than useless: it plans around
+# them and then cannot act.
+SHELL_RULES = """
+Working with a terminal:
+- run_command runs a shell command in the workspace. Reach for it when a
+  program does the job better than retyping text does: transforming a data
+  table, computing a figure you would otherwise estimate, running code you
+  just wrote. python3 and the usual text tools are there. pandas is not, and
+  for a small table you do not want it — the standard library's csv module
+  leaves the columns you were told not to touch exactly as they were.
+- Every file in the workspace is a deliverable and is checked as one. Helper
+  scripts, intermediates and scratch output belong in $SCRATCH, never here.
+  Attachments are read-only at $ATTACHMENTS: read them there, never clean one
+  in place — it is the only record of what the source said.
+- When a deliverable transforms an attached source — a cleaned table, a
+  revised document — begin by copying the source verbatim, then apply each
+  repair to the copy as its own command. One-shot rewrites are where rows get
+  dropped and reordered without anyone noticing, including you.
+- One repair per command, checked in between. The requirement panel beside
+  your workspace attributes every verdict to the step that caused it, so a
+  script that does everything at once tells the person watching nothing about
+  which change did what.
+"""
+
 MAX_HISTORY_BLOCKS = 14
+
+
+def instructions():
+    """The agent's standing instructions for this server's configuration."""
+    return SYSTEM + (SHELL_RULES if tools.shell_enabled() else "")
 
 
 def _condense(messages):
@@ -76,7 +106,13 @@ def workspace_digest(session):
     if not files:
         lines.append("  (empty — nothing has been written yet)")
     for name in files:
-        lines.append(f"  {name} — {tools.word_count(session.workspace.read(name))} words")
+        # Lines as well as words: insert_file takes a line number, and the last
+        # one is the append anchor. Without it here the agent estimates, and
+        # both LongWeave runs spent a step being told the number it guessed was
+        # past the end of the file.
+        text = session.workspace.read(name) or ""
+        lines.append(f"  {name} — {tools.word_count(text)} words, "
+                     f"{tools.line_count(text)} lines")
 
     att = session.attachments.meta()
     if att:
@@ -84,6 +120,12 @@ def workspace_digest(session):
         lines.append("the deliverable and not seen by the checker. Use read_attachment:")
         for a in att:
             lines.append(f"  {a['name']} — {a['lines']} lines, {a['chars']} characters")
+        if tools.shell_enabled():
+            lines.append(f'  in a command these are "$ATTACHMENTS/<name>" '
+                         f"({session.attachments.root})")
+    if tools.shell_enabled():
+        lines.append(f'$SCRATCH is "{session.scratch}" — helper scripts and '
+                     "intermediates go there, where nothing checks them.")
 
     seen = set()
     for req in R.active(session.requirements):
@@ -104,7 +146,8 @@ def build_messages(session):
     context inspector renders. Nothing is added anywhere else."""
     standing = R.standing_block(session.brief, session.requirements)
     digest = workspace_digest(session)
-    system = SYSTEM + ("\n" + standing if standing else "") + "\n" + digest
+    base = instructions()
+    system = base + ("\n" + standing if standing else "") + "\n" + digest
     history, dropped = _condense(session.llm_messages)
     msgs = [{"role": "system", "content": system}] + history
     if dropped:
@@ -119,7 +162,7 @@ def build_messages(session):
         msgs.append({"role": "system", "content": reminder})
 
     parts = [
-        {"key": "system", "label": "Agent instructions", "tokens": llm.estimate_tokens(SYSTEM)},
+        {"key": "system", "label": "Agent instructions", "tokens": llm.estimate_tokens(base)},
         {"key": "brief", "label": "Task brief", "tokens": llm.estimate_tokens(session.brief),
          "detail": (session.brief or "")[:400]},
         {"key": "requirements", "label": "Standing requirements",
@@ -149,6 +192,10 @@ def context_preview(session):
 def _arg_summary(name, args):
     if name in ("read_file", "write_file", "edit_file", "insert_file"):
         return args.get("path") or ""
+    if name == "run_command":
+        # The run stream shows this on one line beside the step; the whole
+        # command, newlines and all, is in the observation underneath.
+        return " ".join((args.get("command") or "").split())[:80]
     if name == "finish":
         return (args.get("summary") or "")[:80]
     return ""
@@ -175,7 +222,12 @@ def _summarize_step(session, name, args, meta, changed):
     if not meta.get("ok"):
         if name in ("write_file", "edit_file", "insert_file"):
             return "The change didn't match the current text, so nothing was changed."
-        return ""
+        # A command that exits non-zero may still have written a file before it
+        # fell over. When it did, the verdicts below are the honest summary of
+        # the step; only a command that changed nothing is just a failure.
+        if name != "run_command" or meta.get("kind") != "edit":
+            return ("The command failed; the workspace is unchanged."
+                    if name == "run_command" else "")
     if name == "run_check":
         c = R.counts(session.requirements)
         unchecked = c.get("unverified", 0) + c.get("partial", 0)
@@ -186,7 +238,7 @@ def _summarize_step(session, name, args, meta, changed):
             if r.get("status") == "active" and rep.get("verdict") == "violated":
                 lines.append(f"{r['id']}: {_plain_detail(r)}")
         return "\n".join(lines)
-    if name in ("write_file", "edit_file", "insert_file"):
+    if meta.get("kind") == "edit":
         lines = []
         # An edit marks every judged requirement it touches "stale" at once, so
         # naming each one prints a wall of near-identical lines that reads like
@@ -259,7 +311,7 @@ def step(session):
     print(f"[step] session={session.id} step={session.step_count + 1} "
           f"calling {llm.MODEL}…", flush=True)
     try:
-        msg = llm.chat(messages, tools=tools.TOOL_SCHEMAS)
+        msg = llm.chat(messages, tools=tools.schemas())
     except Exception as e:                                    # noqa: BLE001
         session.status = "paused"
         session.log("error", text=f"{type(e).__name__}: {e}")

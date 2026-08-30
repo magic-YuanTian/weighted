@@ -12,7 +12,6 @@ import traceback
 
 from flask import Blueprint, jsonify, request
 
-from agent import codex
 from agent import extract as extract_mod
 from agent import loop
 from agent import requirements as R
@@ -136,8 +135,6 @@ def create_session():
 
 
 def _can_continue(s):
-    if codex.enabled():
-        return codex.can_continue(s)
     return s.status not in ("done", "paused")
 
 
@@ -276,9 +273,9 @@ def message():
         return _fail(e)
 
 
-# One turn per session at a time. A client whose /step response died on the
-# wire retries while the first turn is still running server-side; without the
-# lock that starts a second Codex turn against the same workspace.
+# One step per session at a time. A client whose /step response died on the
+# wire retries while the first step is still running server-side; without the
+# lock that starts a second action against the same workspace.
 _TURN_LOCKS = {}
 _TURN_LOCKS_GUARD = threading.Lock()
 
@@ -290,31 +287,23 @@ def _turn_lock(session_id):
 
 @bp.route("/step", methods=["POST"])
 def step():
-    """One unit of agent work: a single action under the native loop, a whole
-    Codex turn under the codex engine."""
+    """One unit of agent work: one planned action and its result."""
     try:
         s, _ = _session()
         lock = _turn_lock(s.id)
         if not lock.acquire(blocking=False):
-            # A turn is already in flight (a retry after a dropped connection,
+            # A step is already in flight (a retry after a dropped connection,
             # or a double click). Report busy; the client polls /state.
             return jsonify({"events": [], "snapshot": s.snapshot(),
                             "canContinue": True, "busy": True})
         try:
-            if codex.enabled():
-                events = codex.run_turn(s)
-                # A Codex turn speaks freely, so an assistant message does not
-                # end the run; only the gate bounce (or a steer) asks for
-                # another turn.
-                can_continue = codex.can_continue(s)
-            else:
-                events = loop.step(s)
-                kinds = {e["type"] for e in events}
-                # The auto-runner stops on anything that wants a human: a
-                # paused loop, a finished task, an error, or the agent replying
-                # instead of acting.
-                can_continue = (s.status not in ("done", "paused")
-                                and not (kinds & {"assistant", "error"}))
+            events = loop.step(s)
+            kinds = {e["type"] for e in events}
+            # The auto-runner stops on anything that wants a human: a paused
+            # loop, a finished task, an error, or the agent replying instead
+            # of acting.
+            can_continue = (s.status not in ("done", "paused")
+                            and not (kinds & {"assistant", "error"}))
         finally:
             lock.release()
         return jsonify({"events": events, "snapshot": s.snapshot(),
@@ -327,18 +316,22 @@ def step():
 
 @bp.route("/pause", methods=["POST"])
 def pause():
-    """Stop the running turn NOW. Under codex a step is a whole multi-minute
-    turn, so 'stop before the next step' reads as a dead button; this kills
-    the turn's process instead. Finished items are already absorbed and
-    verified, and Run resumes the same codex thread."""
+    """Stop the run. A step is one model call and one action, so this normally
+    lands between steps — the status change is what stops the auto-runner. The
+    exception is a shell command, which can hold the step open for its whole
+    timeout; that gets killed through its process handle, and whatever it had
+    already written is absorbed and verified by the step that owns it.
+
+    loop.step only returns the run to "idle" if it is still "running", so a
+    pause that races a step in flight survives it."""
     try:
         s, _ = _session()
-        s._pause_requested = True
-        proc = getattr(s, "_codex_proc", None)
+        if s.status != "done":
+            s.status = "paused"
+        proc = getattr(s, "_proc", None)
         if proc is not None and proc.poll() is None:
             proc.kill()
-        elif s.status != "running":
-            s._pause_requested = False   # nothing in flight — nothing to stop
+        s.save()
         snap = s.snapshot()
         snap["canContinue"] = _can_continue(s)
         return jsonify(snap)
@@ -346,43 +339,6 @@ def pause():
         return jsonify({"error": str(e)}), 404
     except Exception as e:                                    # noqa: BLE001
         return _fail(e)
-
-
-@bp.route("/check", methods=["GET"])
-def check():
-    """The checker as a URL, for the Codex sandbox to curl. Deterministic
-    checks only — the judge runs at end of turn, where the gate needs it.
-    Returns plain text: this is the observation the agent reads."""
-    from flask import Response
-    s = sessions.get(request.args.get("sessionId"))
-    if s is None:
-        return Response("unknown sessionId", status=404, mimetype="text/plain")
-    try:
-        before = {r["id"]: (r.get("report") or {}).get("verdict")
-                  for r in s.requirements}
-        reports = verifier.verify(s, judge_pass=False)
-        R.apply_report(s.requirements, reports)
-        # Stash the flips so the step event for this curl can wear the chips.
-        s._check_chips = [
-            {"id": r["id"], "verdict": (r.get("report") or {}).get("verdict"),
-             "from": before.get(r["id"]), "weight": r.get("weight", 1)}
-            for r in s.requirements
-            if r.get("status") == "active"
-            and (r.get("report") or {}).get("verdict") != before.get(r["id"])]
-        s.save()
-        text = verifier.report_text(s.requirements)
-        # A judge-verified requirement goes STALE the moment its text changes
-        # and this endpoint cannot re-judge it. Without this line the agent
-        # treats STALE as an error and retries the check in a loop.
-        if any((r.get("report") or {}).get("verdict") == "stale"
-               and r.get("verify") == "judge" for r in s.requirements):
-            text += ("\n\nSTALE means the text changed after the last "
-                     "judgement. It is re-judged automatically when you stop "
-                     "— fix FAIL lines, ignore STALE ones, and stop.")
-        return Response(text, mimetype="text/plain")
-    except Exception as e:                                    # noqa: BLE001
-        return Response(f"check failed: {type(e).__name__}: {e}",
-                        status=500, mimetype="text/plain")
 
 
 @bp.route("/file", methods=["POST"])

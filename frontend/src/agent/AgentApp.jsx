@@ -101,11 +101,11 @@ export default function AgentApp() {
     boot().catch((e) => { createdRef.current = false; fail(e); });
   }, [sessionId, setSnap]);
 
-  // Under the codex engine one step is a whole agent turn and the backend
-  // appends events as they stream in. Polling the state while a step is in
-  // flight keeps the three panes live instead of frozen until the turn ends.
+  // A step can hold the connection for a while — a model call, and then a
+  // shell command with a timeout of its own. Polling the state while one is in
+  // flight keeps the three panes live instead of frozen until it returns.
   // …and also while the backend says "running" with no local step in flight —
-  // that is a restored session whose turn is still going server-side.
+  // that is a restored session whose step is still going server-side.
   const live = pending || !!(snap && snap.status === 'running');
   useEffect(() => {
     if (!live || !sessionId) return undefined;
@@ -204,10 +204,11 @@ export default function AgentApp() {
     }
   }, [stepOnce, waitForIdle, sessionId, setSnap]);
 
-  /* Pause must reach the backend: under codex the current "step" is a whole
-     multi-minute turn, and a restored session may have no local loop at all —
-     stopping only the client flag reads as a dead button. Best-effort: the
-     local loop stops regardless, even if the pause request rides bad wifi. */
+  /* Pause must reach the backend: the server's status is what actually stops
+     the run, a restored session may have no local loop at all, and a shell
+     command in flight is killed through its process handle — stopping only the
+     client flag reads as a dead button. Best-effort: the local loop stops
+     regardless, even if the pause request rides bad wifi. */
   const pause = useCallback(() => {
     runRef.current = false;
     setRunning(false);

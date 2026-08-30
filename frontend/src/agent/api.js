@@ -4,9 +4,10 @@ const BASE = '/api/agent';
 // A step is one model call; extraction is one too. Long, but not unbounded —
 // an unbounded wait is indistinguishable from a dead app.
 const TIMEOUT_MS = 180000;
-// Under the codex engine one /step is a whole agent turn, minutes not seconds.
-// The backend kills a turn at its own timeout; this only has to outlast that.
-const STEP_TIMEOUT_MS = 1200000;
+// A step that runs a shell command is the model call plus the command plus the
+// verification pass, and the command has its own timeout on the server
+// (WEIGHTTEXT_SHELL_TIMEOUT, 120s by default). This only has to outlast the sum.
+const STEP_TIMEOUT_MS = 420000;
 
 async function post(path, body, timeoutMs = TIMEOUT_MS) {
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
