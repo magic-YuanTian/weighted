@@ -22,6 +22,7 @@ what it returns — is not in here and belongs to the judge.
 """
 
 import ast
+import keyword
 import re
 
 # Names bound by an import are the library's choice, not the author's, so no
@@ -204,6 +205,55 @@ def _body_line_range(fn):
     return fn.body[0].lineno, getattr(fn, "end_lineno", fn.body[-1].lineno)
 
 
+def _wanted_name(params, *keys, label="name"):
+    """The identifier a check is asked to look for -> (name, why not).
+
+    Two failures, one guard. No name at all is the one the checks already had.
+    The other is a name that is not a name: the extractor writes a placeholder
+    whenever the brief describes something it never names — "<unspecified>",
+    "<name>" — and a placeholder walks straight past `if not name`, so the
+    check goes on to report "no function named <unspecified> is defined" at
+    every step for the rest of the run. That is a violation no edit can clear
+    and nothing can route away, because `usable` only ever sees the verdict.
+    Both cases are unverified, which is what `usable` reads to send the
+    requirement to a judge instead.
+    """
+    raw = ""
+    for key in keys:
+        if params.get(key):
+            raw = str(params[key]).strip()
+            break
+    if not raw:
+        return None, f"no {label} given to look for"
+    if not raw.isidentifier() or keyword.iskeyword(raw):
+        return None, f"{raw!r} is not a {label} a parser can look for"
+    return raw, None
+
+
+# Distribution name -> import name. `imports` compares the word the brief uses
+# for a library against the words the file actually imports, and for these two
+# the answer is not the same word: asked for "pytorch" it reports "pytorch is
+# not imported" over a file that imports torch, for the whole run.
+_IMPORT_ALIASES = {
+    "pytorch": "torch",
+    "scikit-learn": "sklearn", "scikit_learn": "sklearn", "scikitlearn": "sklearn",
+    "beautifulsoup4": "bs4", "beautifulsoup": "bs4",
+    "pillow": "PIL",
+    "opencv-python": "cv2", "opencv": "cv2",
+    "pyyaml": "yaml",
+    "python-dateutil": "dateutil",
+    "attrs": "attr",
+}
+
+# Not libraries. "Your entire response should be written in python" is a claim
+# about the language, and the extractor turns it into {"prop": "imports",
+# "module": "python"} — a check that asks whether the file says `import
+# python`. No working program satisfies it, and a broken one does: an agent
+# told before every action that "python is not imported" eventually writes the
+# line, and the deliverable stops running while the chip turns green.
+_NOT_MODULES = {"python", "python2", "python3"}
+
+
 # ---------------------------------------------------------------- the checks
 
 def check(prop, params, source):
@@ -239,7 +289,9 @@ def usable(prop, params):
     second table of what each one needs. Over no code every real verdict is
     still reachable — "no function named X is defined" is a violation, "no
     variable names to check" is a pass — and the only way to get "unverified"
-    out of it is a parameter the check cannot work without.
+    out of it is a parameter the check cannot work with: one that is missing,
+    or one that is not what it claims to be (a placeholder where a name should
+    be, a language where a module should be).
     """
     return check(prop, params, "")[0] != "unverified"
 
@@ -281,9 +333,9 @@ def _naming(tree, params, source, starts):
 
 def _defines(tree, params, source, starts):
     kind = _kind(params, "function")
-    name = params.get("name") or ""
-    if not name:
-        return "unverified", "no name given to look for", []
+    name, why = _wanted_name(params, "name")
+    if name is None:
+        return "unverified", why, []
     if kind == "function":
         hits = [f for f in _functions(tree) if f.name == name]
     elif kind == "class":
@@ -300,9 +352,13 @@ def _defines(tree, params, source, starts):
 
 
 def _imports(tree, params, source, starts):
-    module = (params.get("module") or params.get("name") or "").split(".")[0]
-    if not module:
-        return "unverified", "no module given to look for", []
+    raw = str(params.get("module") or params.get("name") or "").strip()
+    if raw.lower() in _NOT_MODULES:
+        return "unverified", f"{raw!r} is a language, not a module to import", []
+    head = _IMPORT_ALIASES.get(raw.lower(), raw.split(".")[0])
+    module, why = _wanted_name({"module": head}, "module", label="module")
+    if module is None:
+        return "unverified", why, []
     mods = _imported_modules(tree)
     if module in mods:
         return "satisfied", f"{module} is imported", []
@@ -311,9 +367,9 @@ def _imports(tree, params, source, starts):
 
 
 def _assigned_once(tree, params, source, starts):
-    name = params.get("name") or ""
-    if not name:
-        return "unverified", "no name given to look for", []
+    name, why = _wanted_name(params, "name")
+    if name is None:
+        return "unverified", why, []
     nodes = [node for n, node in _bound_names(tree) if n == name]
     if len(nodes) == 1:
         return "satisfied", f"{name} is assigned exactly once", \
@@ -325,9 +381,9 @@ def _assigned_once(tree, params, source, starts):
 
 
 def _module_level(tree, params, source, starts):
-    name = params.get("name") or ""
-    if not name:
-        return "unverified", "no name given to look for", []
+    name, why = _wanted_name(params, "name")
+    if name is None:
+        return "unverified", why, []
     at = _module_level_targets(tree).get(name)
     if at is not None:
         return "satisfied", f"{name} is assigned at module level", \
@@ -344,11 +400,12 @@ def _initializes(tree, params, source, starts):
     input, and one built inside the function that has that input is exactly
     that. Demanding the module-level binding instead is what turned a working
     solution into a reported contradiction."""
-    name = params.get("name") or ""
-    call = params.get("call") or params.get("class") or ""
+    name, why = _wanted_name(params, "name")
+    call, call_why = _wanted_name(params, "call", "class")
     arg = params.get("arg") or ""
-    if not name or not call:
-        return "unverified", "needs both a name and the class to instantiate", []
+    if name is None or call is None:
+        return "unverified", (why or call_why
+                              or "needs both a name and the class to instantiate"), []
 
     matches, wrong_arg, assigns = [], [], []
     for node in ast.walk(tree):

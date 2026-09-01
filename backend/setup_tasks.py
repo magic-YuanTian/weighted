@@ -57,20 +57,126 @@ CODEIF_DROP = {
 }
 LONGWEAVE_TASK = "longweave/AP_STYLE_WRITING/2k"
 
+# LongWeave's briefs carry two kinds of instruction. The numbered statements
+# under each category are the benchmark's recall half: rewrite this sentence,
+# include it, keep its meaning. Around them sits prose -- a few lines of
+# scoring criteria per category, and a pair of illustrating example lists --
+# and that prose is what the runs die on.
+#
+# It extracts into whole-article judgements. "Use short, clear sentences",
+# "maintain consistent style throughout the text" and "capitalize formal
+# titles before a person's name" each become one requirement measured over the
+# entire 2,000-word report, re-judged after every step, pointing at no sentence
+# in particular. Both measured task 5 runs ended the same way: the gate
+# rejected finish on exactly these, and the agent stopped to ask which
+# sentences it was being failed for -- a question the verdict cannot answer.
+#
+# The example lists are worse. The agent reads them as required content and
+# pastes the AP textbook into the news report: one run's article ends with
+# "The person arrived at the site, and this is a technical topic." and
+# "President Joe Biden visited in a comparison used by the editors" -- and the
+# consistency judgement then fails the article for the editorial matter the
+# brief's own examples put there.
+#
+# So the criteria and their examples are dropped whole and verbatim, and the
+# manifest records each one. What is NOT dropped: the numbered statements, the
+# per-category "Content Requirements for 'X'" headers that demand them, and
+# every rule whose violations the statements themselves carry -- courtesy
+# titles, gender-neutral terms, dates, capitalization. Recall is untouched;
+# what goes is the holistic style judgement over the finished article, which
+# no edit could ever settle.
+LONGWEAVE_DROP = {
+    5: [
+        {"rule": "rewrite-and-include-all (umbrella)",
+         "reason": "one requirement covering all 50 statements at once, "
+                   "re-judged in bulk and unsettleable by any single edit; the "
+                   "per-category headers keep the same demand statement by "
+                   "statement",
+         "blocks": [
+             "**IMPORTANT: Each AP Style category includes example sentences "
+             "that violate its rules. Rewrite and include all of them in your "
+             "article, following AP Style and keeping their meaning. Missing "
+             "or uncorrected items will reduce your score.**\n\n",
+         ]},
+        {"rule": "Clarity and Brevity — scoring criteria and examples",
+         "reason": "brevity, readability and consistency judged over the whole "
+                   "article; the examples are pasted into the report as content",
+         "blocks": [
+             "Scoring Criteria:\n"
+             "- Brevity:\n"
+             "  Avoid long or complex sentences.\n"
+             "- Readability:\n"
+             "  Use simple language suitable for general audiences.\n"
+             "- Consistency:\n"
+             "  Maintain consistent style throughout the text.\n"
+             "\n"
+             "Incorrect Examples:\n"
+             "- 'The aforementioned individual arrived at the location.'\n"
+             "- 'This is a highly technical subject matter.'\n"
+             "\n"
+             "Correct Examples:\n"
+             "- 'The person arrived at the site.'\n"
+             "- 'This is a technical topic.'\n"
+             "\n",
+         ]},
+        {"rule": "Titles and Positions — formal-title capitalization",
+         "reason": "judged over the whole article with no sentence to point "
+                   "at; statements 31-40 still carry the violations to fix",
+         "blocks": [
+             "  Capitalize formal titles before a person's name; use lowercase "
+             "after the name or when used alone.\n",
+             "- 'President Joe Biden visited.'\n"
+             "- 'Joe Biden, President, spoke.'\n",
+             "- 'President Joe Biden visited.'\n"
+             "- 'Joe Biden, the president, spoke.'\n",
+         ]},
+    ],
+}
+
+
+def drop_blocks(prompt, drops, n):
+    """Remove the recorded blocks from one LongWeave prompt.
+
+    Verbatim or not at all: a block that is missing, or that appears twice, is
+    an upstream text this drop list was not written against, and quietly
+    dropping the wrong span would change the benchmark without saying so.
+    """
+    records = []
+    for drop in drops:
+        for block in drop["blocks"]:
+            hits = prompt.count(block)
+            if hits != 1:
+                raise RuntimeError(
+                    f"longweave_{n}: the drop for {drop['rule']!r} matched "
+                    f"{hits} times upstream, expected exactly 1")
+            prompt = prompt.replace(block, "", 1)
+        records.append({"rule": drop["rule"], "reason": drop["reason"],
+                        "text": "".join(drop["blocks"]).strip()})
+        log(f"            dropped {drop['rule']}")
+    return prompt, records
+
+
 # Appended to both CodeIF briefs. The benchmark's own constraints are additive
-# and the agent satisfies them unattended; these interact — line width fights
-# the docstring rule, the eight-line cap fights the no-comprehension rule — so
-# holding one in focus while fixing another is what the highlight feature is
-# for. Measured at reasoning "none": with this paragraph the agent churns
-# (8 gate bounces, violations left); without it, it converges alone.
+# and the agent satisfies them unattended; these interact — the eight-line cap
+# fights the no-comprehension rule, and writing a loop out fights the line
+# width — so holding one in focus while fixing another is what the highlight
+# feature is for. Measured at reasoning "none": with this paragraph the agent
+# churns (8 gate bounces, violations left); without it, it converges alone.
+#
+# A one-line-docstring rule was here and is gone. The sentence asked for "a
+# one-line docstring that says what it takes (self aside) and what it
+# returns", which extraction splits in two: docstring presence, which a parser
+# settles, and "says what it takes and returns", which only a judge can. The
+# judge never settled it — across two runs it went satisfied, violated and
+# satisfied again over docstrings the step in between had not touched — so the
+# requirement was measuring the judge rather than the agent, and the task lost
+# the sentence instead of keeping an unsteerable chip on the rail.
 CODEIF_HOUSE_STYLE = (
     "The file must also satisfy a house style. Keep every line under 80 "
     "characters. Keep every function body, the lines between the def line "
-    "and the end of the function, to at most eight lines. Give every "
-    "function and every class a one-line docstring that says what it "
-    "takes (self aside) and what it returns. Do not leave blank lines "
-    "inside any function body, and do not use list comprehensions "
-    "anywhere; write the loops out instead.")
+    "and the end of the function, to at most eight lines. Do not leave "
+    "blank lines inside any function body, and do not use list "
+    "comprehensions anywhere; write the loops out instead.")
 
 # Per-question clarifiers appended after the benchmark constraints. 738's
 # list pairs "snake_case variable names" with "max_freq should be a
@@ -294,7 +400,7 @@ def build_longweave(meta, briefs):
     for i, row in enumerate(found):
         n = 5 + i
         first = i == 0
-        prompt = row["prompt"]
+        prompt, dropped = drop_blocks(row["prompt"], LONGWEAVE_DROP.get(n, []), n)
         title = prompt.split("titled '")[1].split("'")[0] if "titled '" in prompt else "untitled"
         # "Around 2048 words" made the extractor open every run with a
         # clarification question about what "around" means. The study session
@@ -307,6 +413,7 @@ def build_longweave(meta, briefs):
         meta.append(dict(
             id=f"longweave_{n}", n=n, domain="Writing", benchmark="LongWeave",
             label=f"LongWeave {n-4} — {title[:44]}",
+            dropped=dropped,
             source=f"LongWeave AP_STYLE_WRITING/2k (arXiv:2510.24345), MIT, "
                    f"{len(row['metadata']['statements'])} statements",
             note=("Overrun is discarded before scoring, so recall and the 2,048-word "
@@ -316,7 +423,8 @@ def build_longweave(meta, briefs):
                   "content, so the pair isolates content from task design."),
             tested=first))
         log(f"            task {n}: {title[:50]}, "
-            f"{len(row['metadata']['statements'])} statements")
+            f"{len(row['metadata']['statements'])} statements"
+            + (f" ({len(dropped)} style rule(s) dropped)" if dropped else ""))
 
 
 def main():

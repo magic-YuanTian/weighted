@@ -58,7 +58,18 @@ Extract the requirements. Rules:
                                       about VARIABLE names says nothing about a
                                       class name, and vice versa.)
                        defines       {{"kind":"function"|"class"|"variable","name":"..."}}
+                                     (the name has to be one the brief itself
+                                      gives, spelled as the brief spells it. A
+                                      brief that describes something without
+                                      naming it — "a function to read the CSV"
+                                      — hands you no name, and a name you pick
+                                      is checked against code nobody told to
+                                      use it: that one is `content`.)
                        imports       {{"module":"numpy"}}
+                                     (a library the brief names as a dependency,
+                                      under its import name. The language the
+                                      code is written in is not an import —
+                                      "written in Python" is `content`.)
                        assigned_once {{"name":"max_freq"}}   ("is a constant")
                        module_level  {{"name":"max_freq"}}   ("is a global variable")
                        initializes   {{"name":"obj","call":"MyClass","arg":"signal"}}
@@ -127,6 +138,42 @@ def _locate(brief, quote):
     return [idx, idx + len(quote)]
 
 
+# The code-props that check for a literal identifier, and where they keep it.
+# The prompt asks for names the brief gave; this is what happens when the ask
+# is not honoured, which for a describe-don't-name brief is most of the time.
+_NAMED_PARAMS = {
+    "defines": ("name",),
+    "assigned_once": ("name",),
+    "module_level": ("name",),
+    "initializes": ("name", "call"),
+}
+
+
+def _grounded(brief, raw):
+    """Does every identifier this code-prop checks for appear in the brief?
+
+    A name the brief does not contain is the extractor's invention, not the
+    assignment's requirement. Told "a function to scrape recent tweets" the
+    model supplies `scrape_tweets`, and the run is then graded on a word the
+    agent is never shown — `params` reach the checker, never the prompt — so
+    it passes by coincidence or fails forever. Ungrounded, the requirement is
+    still real; it is just a claim about the code's meaning, which a judge can
+    answer and a parser cannot.
+    """
+    if (raw.get("type") or "") != "code-prop":
+        return True
+    params = raw.get("params") or {}
+    keys = _NAMED_PARAMS.get(str(params.get("prop") or "").strip().lower())
+    if not keys:
+        return True
+    haystack = brief.lower()
+    for key in keys:
+        value = str(params.get(key) or "").strip().lower()
+        if value and value not in haystack:
+            return False
+    return True
+
+
 def extract(brief):
     """Returns {requirements, questions, coverage} — nothing is committed here;
     the review screen owns what enters the store."""
@@ -150,6 +197,8 @@ def extract(brief):
         # steering act, made once there are verdicts to steer against, and it
         # is only measurable as a user act if the system never does it first.
         raw = {**raw, "weight": 1}
+        if not _grounded(brief, raw):
+            raw = {**raw, "verify": "judge"}
         req = R.normalize({**raw, "id": f"R{len(proposals) + 1}",
                            "source": {"kind": "extracted",
                                       "quote": (raw.get("quote") or "").strip(),
