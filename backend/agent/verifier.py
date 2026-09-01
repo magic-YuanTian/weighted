@@ -234,6 +234,60 @@ def _artifact_evidence(doc, locations, limit=6):
     return out
 
 
+def _reanchor(doc, evidence, rng):
+    """Carried-forward evidence, re-pointed at the text it quotes.
+
+    A scope hash proves the scope's CONTENT has not changed. It cannot prove
+    the scope has not MOVED, and an artifact span is an absolute offset into
+    a file. Edit a line above a function and the function still hashes the
+    same, so the verdict on it is still true and is rightly kept — while every
+    span inside it now points a few characters to the left, and the rail draws
+    its underline through the middle of the previous word.
+
+    Across the recorded runs that was 40 of 1,220 artifact spans. Every one of
+    them sat on a judge verdict — code verdicts rebuild their spans from the
+    parse on every pass, so they cannot drift — and within a session they were
+    all displaced by the same amount: -4 here, -8 there, +16, +1720.
+
+    The quote is the durable half of a span, so the span is rebuilt from it,
+    keeping its original length; the occurrence nearest the old offset wins,
+    because a phrase that appears twice must not jump to the other one just
+    because a line above it was rewritten. A quote that is gone loses its span
+    instead of keeping a wrong one — no underline is a smaller lie than an
+    underline over the wrong words.
+    """
+    out = []
+    for ev in evidence or []:
+        if ev.get("kind") != "artifact":
+            out.append(ev)
+            continue
+        if ev.get("scope"):
+            # The whole-scope band is the scope; re-derive it from where the
+            # scope is now rather than from where it was.
+            placed = locate(doc, rng[0], rng[1])
+            if placed["file"]:
+                out.append({**ev, "file": placed["file"],
+                            "start": placed["start"],
+                            "end": placed["start"] + (rng[1] - rng[0])})
+            continue
+        quote = ev.get("quote") or ""
+        base = next((f for f in doc["files"] if f["file"] == ev.get("file")), None)
+        if not quote or base is None:
+            continue
+        body = doc["text"][base["start"]:base["end"]]
+        hits, idx = [], body.find(quote)
+        while idx >= 0:
+            hits.append(idx)
+            idx = body.find(quote, idx + 1)
+        if not hits:
+            continue
+        was = ev.get("start") or 0
+        best = min(hits, key=lambda i: abs(i - was))
+        span = max(ev.get("end", 0) - was, len(quote))
+        out.append({**ev, "start": best, "end": min(best + span, len(body))})
+    return out
+
+
 def _check_code_prop(req, doc, scope_range):
     """Dispatch to the AST checker, per Python file the scope covers.
 
@@ -600,7 +654,8 @@ def verify(session, judge_pass=False, **kw):
             # Not judged this pass: keep the old verdict, but only while the
             # text it was computed from has not moved underneath it.
             verdict = prev.get("verdict", "unverified")
-            detail, evidence = prev.get("detail", ""), prev.get("evidence", [])
+            detail = prev.get("detail", "")
+            evidence = _reanchor(doc, prev.get("evidence", []), rng)
             confidence = prev.get("confidence")
             if verdict in ("satisfied", "violated", "partial"):
                 if prev.get("scopeHash") and prev["scopeHash"] != scope_hash:
