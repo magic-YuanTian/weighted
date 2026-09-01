@@ -383,7 +383,7 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
         onMouseUp={readSelection}
         onKeyUp={(e) => { if (e.shiftKey || e.key === 'Shift') readSelection(); }}
       >
-        {sel && (
+        {sel && onFreeze && onAnchor && (
           <div className="seltools"
                style={{ left: sel.x, top: sel.y }}
                onMouseDown={(e) => e.preventDefault()} /* keep focus & selection */>

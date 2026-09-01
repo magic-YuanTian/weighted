@@ -4,7 +4,7 @@
 import React from 'react';
 import '@testing-library/jest-dom';   // no src/setupTests.js in this project
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import AgentApp from './AgentApp';
+import AgentApp, { hashForMode } from './AgentApp';
 
 const REQS = [
   {
@@ -64,10 +64,25 @@ const CONTEXT = {
 
 const body = (obj) => Promise.resolve({ ok: true, json: () => Promise.resolve(obj) });
 
-beforeAll(() => { Element.prototype.scrollIntoView = jest.fn(); });
+beforeAll(() => {
+  Element.prototype.scrollIntoView = jest.fn();
+  // The setting picker's last act is a reload, which jsdom refuses to perform.
+  // A stand-in location keeps the hash readable and records the reload instead.
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: { href: window.location.href, hash: '#agent', reload: jest.fn() },
+  });
+});
 
 beforeEach(() => {
   window.location.hash = '#agent';
+  window.location.reload.mockClear();
+  // Normalizing the hash goes through replaceState, which jsdom would apply to
+  // the real location the stub above stands in for. Re-armed per test: CRA's
+  // jest config resets mocks between them, implementations included.
+  jest.spyOn(window.history, 'replaceState').mockImplementation((a, b, url) => {
+    window.location.hash = url;
+  });
   global.fetch = jest.fn((url) => {
     if (url.includes('/session')) return body(EMPTY);
     if (url.includes('/context')) return body(CONTEXT);
@@ -465,6 +480,33 @@ test('a step explains itself in words, and the raw checker output stays out of s
   expect(document.querySelector('.obs')).toBeNull();
 });
 
+test('an empty model turn is recorded, not announced', async () => {
+  // The loop recovers from it on its own, so the chat has nothing to say about
+  // it: amber is for what a participant can act on, and there are two of those.
+  const WITH_TRACE = {
+    ...RUNNING,
+    events: [
+      ...RUNNING.events,
+      { i: 3, type: 'trace', kind: 'empty-turn',
+        text: 'The model returned a turn with no tool call and no message; '
+          + 'the loop asked it to finish or act.' },
+    ],
+  };
+  global.fetch = jest.fn((url) => {
+    if (url.includes('/session')) return body(EMPTY);
+    if (url.includes('/step')) return body({ events: [], snapshot: WITH_TRACE, canContinue: false });
+    return body(WITH_TRACE);
+  });
+
+  await startSession();
+  // wait for the run's own events to be on screen — the rail header is there
+  // from the first render, so it would let this assert against nothing
+  await screen.findByText('Step 2');
+  expect(document.querySelector('.notice')).toBeNull();
+  expect(document.querySelector('.trace')).toBeNull();
+  expect(document.body.textContent).not.toMatch(/no tool call/);
+});
+
 test('verdicts set outside any step still get their labels in the log', async () => {
   const WITH_RECHECK = {
     ...RUNNING,
@@ -487,4 +529,208 @@ test('verdicts set outside any step still get their labels in the log', async ()
   expect(judged.parentElement.querySelector('.rchip').textContent).toBe('R2');
   const edited = screen.getByText('You edited the cover letter');
   expect(edited.parentElement.querySelector('.rchip').textContent).toBe('R1');
+});
+
+/* ---------------------------------------------------------------- baseline
+
+   The control condition: same model, same tools, same screen, with the
+   requirement machinery removed. What is asserted here is what the study
+   depends on — that the screen a baseline participant sees carries none of the
+   treatment, and that the condition travels to the server rather than being a
+   client-side illusion. */
+
+const BASELINE = {
+  sessionId: 'b1', mode: 'baseline', brief: 'Write a package.', status: 'idle',
+  stepCount: 2, gateOn: false, requirements: [], counts: {}, blocking: [],
+  questions: [], files: [{ path: 'cover_letter.md', text: 'A cutting-edge letter body.' }],
+  events: [
+    { i: 0, type: 'user', text: 'The cover letter must be 350-500 words.' },
+    {
+      i: 1, type: 'step', step: 2, action: 'edit_file', argSummary: 'cover_letter.md',
+      thought: 'Rewrote paragraph two.', observation: 'wrote cover_letter.md (512 words)',
+      meta: { ok: true, kind: 'edit', path: 'cover_letter.md', add: 12, del: 4 },
+      chips: [], summary: '', pinned: [],
+    },
+  ],
+};
+
+/* sessionStorage survives between tests in one jsdom, and the bootstrap
+   resumes a stored session instead of creating one. Clearing it is what makes
+   "was the condition sent to the server?" answerable at all. */
+function freshTab() {
+  try { window.sessionStorage.clear(); } catch (e) { /* not available */ }
+}
+
+/* The routes _weighted_only guards on the server. The mock refuses them the
+   way the server does — 409 with the server's own wording — so a treatment
+   request that leaks into a baseline run fails the suite here instead of
+   surfacing as a red banner in front of a participant. */
+const WITHHELD = ['/extract', '/commit', '/steer', '/gate', '/requirement', '/recheck'];
+const withheld = () => Promise.resolve({
+  ok: false, status: 409,
+  json: () => Promise.resolve({
+    error: 'this session is a baseline run: '
+      + 'requirements, steering and the gate are not part of it',
+  }),
+});
+
+function mockBaseline() {
+  freshTab();
+  window.location.hash = '#agent/s2';
+  global.fetch = jest.fn((url) => {
+    if (WITHHELD.some((p) => String(url).includes(p))) return withheld();
+    if (url.includes('/session')) return body({ ...BASELINE, brief: '', stepCount: 0, events: [] });
+    if (url.includes('/step')) return body({ events: [], snapshot: BASELINE, canContinue: false });
+    return body(BASELINE);
+  });
+}
+
+async function startBaseline() {
+  mockBaseline();
+  render(<AgentApp />);
+  const composer = await screen.findByPlaceholderText(/Describe the task/);
+  fireEvent.change(composer, { target: { value: 'Write an application package.' } });
+  fireEvent.keyDown(composer, { key: 'Enter' });
+  return composer;
+}
+
+test('baseline: the condition is asked for at the server, not faked on the client', async () => {
+  mockBaseline();
+  render(<AgentApp />);
+  await waitFor(() => {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/session'));
+    expect(call).toBeDefined();
+    expect(JSON.parse(call[1].body)).toMatchObject({ mode: 'baseline' });
+  });
+});
+
+test('baseline: no requirement rail, and the two panes that remain fill the width', async () => {
+  await startBaseline();
+  expect(await screen.findByText('Chat')).toBeInTheDocument();
+  expect(screen.getByText('Workspace')).toBeInTheDocument();
+  expect(screen.queryByText('Requirements')).toBeNull();
+  expect(document.querySelector('.cols').getAttribute('data-panes')).toBe('2');
+  expect(document.querySelector('.wt4').getAttribute('data-mode')).toBe('baseline');
+});
+
+test('baseline: selecting text in the workspace offers no freeze and no anchored edit', async () => {
+  await startBaseline();
+  await screen.findByText('Workspace');
+  expect(screen.queryByText(/Freeze/)).toBeNull();
+  expect(screen.queryByText('Replace…')).toBeNull();
+  expect(screen.queryByText('Insert after…')).toBeNull();
+});
+
+test('baseline: a finished run asks for no recheck, and shows no error', async () => {
+  await startBaseline();
+  // the run has to actually reach its end — the closing recheck is the last
+  // thing doRun does, after the loop stops
+  await waitFor(() => expect(global.fetch.mock.calls.some(
+    (c) => String(c[0]).includes('/step'))).toBe(true));
+  await waitFor(() => expect(document.querySelector('.wt4')).toBeInTheDocument());
+  expect(global.fetch.mock.calls.some((c) => WITHHELD.some(
+    (r) => String(c[0]).includes(r)))).toBe(false);
+  expect(document.querySelector('.err')).toBeNull();
+  expect(document.body.textContent).not.toMatch(/baseline run/);
+});
+
+test('baseline: the step says what it did and claims nothing about requirements', async () => {
+  await startBaseline();
+  await waitFor(() => expect(global.fetch.mock.calls.some(
+    (c) => String(c[0]).includes('/step'))).toBe(true));
+  expect(await screen.findByText(/cover_letter\.md/)).toBeInTheDocument();
+  // the treatment's reassurance must not appear where nothing was checked
+  expect(screen.queryByText(/Everything checked so far is met/)).toBeNull();
+  expect(document.body.textContent).not.toMatch(/blocking finish/);
+});
+
+test('the weighted condition still gets the rail', async () => {
+  freshTab();
+  await startSession();
+  expect(await screen.findByText('Requirements')).toBeInTheDocument();
+  expect(document.querySelector('.cols').getAttribute('data-panes')).toBe('3');
+  const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/session'));
+  expect(JSON.parse(call[1].body)).toMatchObject({ mode: 'weighted' });
+});
+
+/* -------------------------------------------------- the setting picker
+
+   The one control that changes condition, and the participant's own: what
+   matters is that it is on the screen in both conditions, that it reports the
+   condition the session is actually in, that it numbers the conditions rather
+   than naming them, and that switching does not throw away the other flags in
+   the hash. */
+
+test('the switcher builds a hash that keeps every other flag', () => {
+  expect(hashForMode('#agent/dev', 'baseline')).toBe('#agent/dev/s2');
+  expect(hashForMode('#agent/dev/s2', 'weighted')).toBe('#agent/dev/s1');
+  expect(hashForMode('#agent/dev/s2', 'baseline')).toBe('#agent/dev/s2');
+  expect(hashForMode('#agent', 'baseline')).toBe('#agent/s2');
+  expect(hashForMode('#agent/s2', 'weighted')).toBe('#agent/s1');
+  expect(hashForMode('', 'weighted')).toBe('#agent/s1');
+  expect(hashForMode('#agent/review', 'baseline')).toBe('#agent/review/s2');
+});
+
+test('neither setting spells its condition out in the URL', () => {
+  const built = ['weighted', 'baseline'].flatMap((m) => [
+    hashForMode('#agent', m), hashForMode('#agent/dev', m), hashForMode('', m),
+  ]);
+  built.forEach((h) => expect(h).not.toMatch(/baseline|weighted/i));
+});
+
+test('a bookmarked #agent/baseline still resolves to the control, renamed', () => {
+  expect(hashForMode('#agent/baseline', 'baseline')).toBe('#agent/s2');
+  mockBaseline();
+  window.location.hash = '#agent/baseline';
+  render(<AgentApp />);
+  return waitFor(() => {
+    // the condition it was saved for, asked for at the server as before…
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/session'));
+    expect(JSON.parse(call[1].body)).toMatchObject({ mode: 'baseline' });
+    // …and the word gone from the address bar, without a history entry
+    expect(window.location.hash).toBe('#agent/s2');
+    expect(window.history.replaceState).toHaveBeenCalled();
+  });
+});
+
+test('a bare #agent is normalized too, so neither URL is the plain one', async () => {
+  freshTab();
+  await startSession();
+  await screen.findByText('Requirements');
+  expect(window.location.hash).toBe('#agent/s1');
+});
+
+test('the participant screen carries the picker, on the session\'s own setting', async () => {
+  freshTab();
+  await startSession();
+  await screen.findByText('Requirements');
+  const sel = document.querySelector('.setting select');
+  expect(sel).not.toBeNull();
+  expect(sel.value).toBe('weighted');
+});
+
+test('the picker numbers the conditions and never names them', async () => {
+  freshTab();
+  await startSession();
+  await screen.findByText('Requirements');
+  const opts = [...document.querySelectorAll('.setting option')];
+  expect(opts.map((o) => o.textContent)).toEqual(['Setting 1', 'Setting 2']);
+  expect(document.body.textContent).not.toMatch(/baseline/i);
+});
+
+test('a baseline session shows the picker on setting 2, and the rail is still gone', async () => {
+  mockBaseline();
+  render(<AgentApp />);
+  await waitFor(() => expect(document.querySelector('.setting select')).not.toBeNull());
+  expect(document.querySelector('.setting select').value).toBe('baseline');
+  expect(screen.queryByText('Requirements')).toBeNull();
+});
+
+test('picking the other setting rewrites the hash and reloads into it', async () => {
+  freshTab();
+  await startSession();
+  await screen.findByText('Requirements');
+  fireEvent.change(document.querySelector('.setting select'), { target: { value: 'baseline' } });
+  await waitFor(() => expect(window.location.hash).toBe('#agent/s2'));
+  expect(window.location.reload).toHaveBeenCalled();
 });

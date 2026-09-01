@@ -29,7 +29,8 @@ user always sees what is met, what is not, and which step made it so.
       checker.py       deterministic text checks
       setup_tasks.py   fetches the six benchmark tasks (see below)
       agent/           extraction, verification, tools, the step loop
-      tasks/           the fetched tasks and their data (git-ignored)
+      tasks/           the fetched tasks, their attachments and the
+                       graders' gold answers (git-ignored)
       runs/            one directory per session: workspace, attachments,
                        and the event log (git-ignored)
     frontend/
@@ -127,23 +128,85 @@ supply their own credentials and the API needs a rate limit.
 
 ### Benchmark tasks (optional)
 
-The composer offers a picker of six evaluation tasks — two each from CodeIF,
-T2R-bench and LongWeave. They are not in this repository: two of the three
-benchmarks ship without a licence file, so nothing is redistributed here.
-Fetch and assemble them once:
+The composer offers a picker of six evaluation tasks, in three matched pairs,
+plus a warm-up. They are not in this repository: AutoDCWorkflow ships without a
+licence file, so nothing is redistributed here. Fetch and assemble them once:
 
     cd backend && ../.venv/bin/python setup_tasks.py
 
-This writes `backend/tasks/`, which is git-ignored. Instances are pinned by id,
-so re-running reproduces the same six tasks. Neither large source archive is
-downloaded whole — the T2R tables are ranged out of a 234 MB zip (~0.3 MB
-transferred) and the LongWeave file is streamed only as far as the rows needed
-(~159 MB of 224 MB).
+| # | Task | Artifact | What it is for |
+|---|------|----------|----------------|
+| 0 | Warm-up (AutoDCWorkflow p148) | 20-row table | the tutorial sitting — converges unattended |
+| 1-2 | LongWeave CODE_FIXING/4k | 352- and 347-line Python file | flake8 grades it, and its rules break each other |
+| 3-4 | LongWeave SALES_REPORT/2k | 300-row table, 2,048-word report | 30 gold figures the report has to get right |
+| 5-6 | AutoDCWorkflow menu p13, p28 | 100 x 20 and 100 x 21 tables | the columns nobody asked you to touch |
+
+Every task attaches its source rather than pasting it into the brief, so the
+requirement checker never sees the data. Gold answers land in
+`backend/tasks/gold/` and are never attached to a session — the agent has no
+route to them through the tools, though its shell can still walk the
+filesystem, so treat that directory as out of bounds rather than sealed.
+
+This writes `backend/tasks/`, which is git-ignored. Instances are pinned — by
+purpose id upstream, and for LongWeave by ordinal within a (task, tier) group —
+so re-running reproduces the same six tasks. The 224 MB LongWeave file is
+streamed once and read only as far as the last row needed (~60 MB of it).
 
 Skip this and the app still runs: `/api/agent/presets` returns an empty list
 and the picker hides itself. The backend reads the directory per request, so
-no restart is needed after running it — reload the page and the six tasks are
+no restart is needed after running it — reload the page and the tasks are
 there.
+
+`setup_tasks.py`'s docstring carries the measurements these six were chosen on
+and what the old set failed.
+
+## The two conditions
+
+A session is created in one of two modes, and the mode is fixed for its life.
+
+| | `#agent/s1` — weighted | `#agent/s2` — baseline |
+|---|---|---|
+| model, tools, workspace, chat | same | same |
+| brief extracted into a requirement list | yes | no |
+| every step verified, chips and evidence | yes | no |
+| highlight to steer, freeze a span | yes | no |
+| finish gate | yes | no |
+| `run_check` tool | offered | withheld |
+
+The baseline is the control the study rests on, so it is enforced at the
+server, not drawn on the client: `/session` records the mode, `/requirement`,
+`/steer`, `/gate`, `/recheck`, `/commit` and `/extract` answer **409** on a
+baseline session, and the mode is written into the `session` event and into
+`session.json` so no run's condition has to be inferred afterwards.
+
+The prompts differ by exactly the requirement machinery and nothing else. The
+weighted composition in `backend/agent/loop.py` is byte-identical to the single
+prompt that preceded the split, so runs measured before it are comparable; the
+baseline drops the `run_check` rule, the "do not claim a requirement is met"
+rule and the verdict/gate rule, and keeps every rule about how to use the
+tools — a baseline that is prompted badly measures prompt engineering, not the
+interface.
+
+Switching the hash resumes nothing across conditions: sessions are keyed per
+mode in the tab, and the server's answer decides what the screen draws.
+
+The switch itself is a **Setting** dropdown in the chat header, on the screen
+in both conditions: `Setting 1` is weighted, `Setting 2` is baseline. It is
+numbered rather than named because a participant has to be able to find and
+change the setting without being told which of the two is the treatment. It
+cannot flip the run in front of you — a session's condition is fixed when it is
+created — so it rewrites the hash and reloads into the other one, where the tab
+keeps its own session.
+
+The URL is numbered for the same reason, and it is the same control by another
+route: typing `#agent/s2` and picking `Setting 2` do the same thing. Both
+settings carry a token, because a bare `#agent` sitting beside an `#agent/s2`
+is a tell of its own — the one without a flag reads as the ordinary version,
+and so as the treatment — and a bare `#agent` is rewritten to `#agent/s1` on
+arrival. The hash used to spell the condition out, and `#agent/baseline` is
+still *read* so a bookmark resolves to the condition it was saved for; it is
+never written, and `normalizeHash` replaces it (via `replaceState`, so the word
+is not one press of the back button away) before the screen is drawn.
 
 ## Notes
 

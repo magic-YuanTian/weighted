@@ -13,6 +13,7 @@ contract the edit tools state as "the file is unchanged" is enforced here one
 moment later instead, which is the most a shell allows.
 """
 
+import copy
 import difflib
 import os
 import re
@@ -191,13 +192,49 @@ TOOL_SCHEMAS = [
 ]
 
 
-def schemas():
+# The two descriptions that only make sense where something is checking. The
+# baseline gets the same tools minus run_check, and finish loses the sentence
+# about being rejected — a tool whose description promises a gate that is not
+# there is a tool the model plans around wrongly.
+_BASELINE_DESCRIPTIONS = {
+    "run_command": ("run_command", "every file "
+                    "in the workspace itself is a deliverable and is checked as one. Make "
+                    "one repair per command.",
+                    "every file in the workspace itself is a deliverable. Make one "
+                    "repair per command."),
+    "finish": ("finish", "Declare the task complete. Rejected while a requirement is "
+                         "violated, partially met, or stale.",
+               "Declare the task complete."),
+}
+
+
+def schemas(mode="weighted"):
     """The tools offered for the next action. A disabled shell is withheld
     rather than offered and refused — a tool the model can see is a tool it
-    plans around, and it should not plan around one that never works."""
-    if shell_enabled():
-        return TOOL_SCHEMAS
-    return [t for t in TOOL_SCHEMAS if t["function"]["name"] != "run_command"]
+    plans around, and it should not plan around one that never works. The
+    baseline condition loses run_check for the same reason."""
+    out = TOOL_SCHEMAS
+    if not shell_enabled():
+        out = [t for t in out if t["function"]["name"] != "run_command"]
+    if mode != "baseline":
+        return out
+    baseline = []
+    for t in out:
+        name = t["function"]["name"]
+        if name == "run_check":
+            continue
+        edit = _BASELINE_DESCRIPTIONS.get(name)
+        if edit:
+            _, before, after = edit
+            desc = t["function"]["description"]
+            if before not in desc:
+                raise RuntimeError(
+                    f"baseline schema for {name!r}: the sentence it rewrites is "
+                    f"not in the tool description any more")
+            t = copy.deepcopy(t)
+            t["function"]["description"] = desc.replace(before, after)
+        baseline.append(t)
+    return baseline
 
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -642,6 +679,13 @@ def execute(session, name, args):
             return _run_command(session, command)
 
         if name == "run_check":
+            # Not offered in the baseline condition, so reaching here means a
+            # model invented the call. Saying so beats running a checker over
+            # an empty requirement list and reporting that all zero of them
+            # pass, which reads to the agent as a clean bill of health.
+            if session.mode == "baseline":
+                return ("there is no run_check tool in this workspace",
+                        {"ok": False, "kind": "error"})
             from . import verifier
             reports = verifier.verify(session, judge=False)
             R.apply_report(session.requirements, reports)

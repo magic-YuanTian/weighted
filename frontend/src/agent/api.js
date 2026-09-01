@@ -50,7 +50,7 @@ async function get(path, params) {
 }
 
 export const api = {
-  createSession: (brief) => post('/session', { brief }),
+  createSession: (brief, mode) => post('/session', { brief, mode }),
   state: (sessionId) => get('/state', { sessionId }),
   extract: (brief, sessionId) => post('/extract', { brief, sessionId }),
   answer: (sessionId, requirement, question, answer) =>

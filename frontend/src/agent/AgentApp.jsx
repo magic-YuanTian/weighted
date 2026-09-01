@@ -10,14 +10,67 @@ import './agent.css';
 
 const MAX_AUTO_STEPS = 24;
 
-/* Researcher-only variants of the same session, chosen by the URL:
-     #agent          the study screen — one screen, chat first
-     #agent/review   the staged flow (brief -> requirement review -> run),
-                     kept because "did an explicit review screen help?" is an
-                     experimental condition, not a settled question
-     #agent/dev      single-stepping and session export                       */
-export const DEV = () => window.location.hash.includes('dev');
-const REVIEW_FLOW = () => window.location.hash.includes('review');
+/* Variants of the same session, chosen by the URL:
+     #agent/s1     setting 1 — the weighted condition: the brief becomes a
+                   requirement list, every step is verified, the gate holds
+                   finish
+     #agent/s2     setting 2 — the control: the same model, the same tools and
+                   this same screen, with the requirement rail, the verifier
+                   and the gate removed. The backend enforces it — the token
+                   only decides what is asked for and what is drawn
+     #agent/review the staged flow (brief -> requirement review -> run), kept
+                   because "did an explicit review screen help?" is an
+                   experimental condition, not a settled question
+     #agent/dev    single-stepping and session export
+
+   The URL names the settings the way the screen does, and for the same reason.
+   It used to spell the condition out — `#agent/baseline` — which put the answer
+   to the study's own question in the address bar, above a screen built not to
+   give it away. Numbering the tokens is not decoration: it is the same blind
+   the picker keeps, held one level up. */
+const MODE_TOKEN = { weighted: 's1', baseline: 's2' };
+// What a hash part means. `baseline` is the old spelling, still read so that a
+// bookmarked link resolves to the condition it was saved for — a link that
+// silently ran the other one would be worse than a broken link. It is never
+// written back: normalizeHash rewrites it on arrival.
+const TOKEN_MODE = { s1: 'weighted', s2: 'baseline', baseline: 'baseline' };
+
+// Exact parts, not a substring of the whole hash: `s1` and `s2` are short
+// enough that `includes` would start matching things that are not flags.
+const hashParts = (hash) => String(hash || '').replace(/^#/, '').split('/').filter(Boolean);
+
+export const DEV = () => hashParts(window.location.hash).includes('dev');
+const WANTED_MODE = () => {
+  const found = hashParts(window.location.hash).map((p) => TOKEN_MODE[p]).find(Boolean);
+  return found || 'weighted';
+};
+
+/* The hash that means `target`, keeping every other flag it already carries:
+   switching setting must not silently drop `dev` or `review` and land the next
+   session in a different flow than the one it left. Both settings carry a
+   token — a bare `#agent` beside an `#agent/s2` is a tell of its own, since the
+   one without a flag reads as the ordinary version and so as the treatment. */
+export function hashForMode(hash, target) {
+  const rest = hashParts(hash).filter((p) => !TOKEN_MODE[p]);
+  if (!rest.length) rest.push('agent');
+  return `#${[...rest, MODE_TOKEN[target] || MODE_TOKEN.weighted].join('/')}`;
+}
+
+/* The URL the app then lives at. A legacy `#agent/baseline`, and a bare
+   `#agent`, both become the neutral form — with replaceState, so the word is
+   not left behind one press of the back button away. The condition it resolves
+   to never changes here; only how the URL spells it. */
+function normalizeHash() {
+  const want = hashForMode(window.location.hash, WANTED_MODE());
+  if (window.location.hash === want) return;
+  try { window.history.replaceState(null, '', want); }
+  catch (e) { window.location.hash = want; }   // no history API: still not the word
+}
+
+// The staged flow is a requirement review, so there is nothing for it to show
+// in the control — and its first request would be refused. Setting 2 wins.
+const REVIEW_FLOW = () => hashParts(window.location.hash).includes('review')
+  && WANTED_MODE() !== 'baseline';
 
 export default function AgentApp() {
   const [stage, setStage] = useState(REVIEW_FLOW() ? 'brief' : 'run');
@@ -81,22 +134,33 @@ export default function AgentApp() {
   // sessionStorage scopes this to the tab, so a new tab is always a new run.
   const createdRef = useRef(false);   // StrictMode runs effects twice; one session is enough
   useEffect(() => {
+    // Before anything else reads it: the address bar is the one part of the
+    // screen this app does not draw, and it is the first thing a participant
+    // sees. Cheap and idempotent, so it rides along with the boot effect.
+    normalizeHash();
     if (REVIEW_FLOW() || sessionId || createdRef.current) return;
     createdRef.current = true;
+    // Keyed by condition. Switching the hash in one tab must not resume the
+    // other condition's session — that would put a baseline participant in
+    // front of a requirement rail, and the run would be neither condition.
+    const key = `wt-session-${WANTED_MODE()}`;
     const stored = (() => {
-      try { return window.sessionStorage.getItem('wt-session'); } catch (e) { return null; }
+      try { return window.sessionStorage.getItem(key); } catch (e) { return null; }
     })();
     const boot = async () => {
       if (stored) {
         try {
           const s = await api.state(stored);
-          if (s.status !== 'done') { setSessionId(stored); setSnap(s); return; }
+          // ...and the server's answer decides, not the key it was filed under
+          if (s.status !== 'done' && (s.mode || 'weighted') === WANTED_MODE()) {
+            setSessionId(stored); setSnap(s); return;
+          }
         } catch (e) { /* stale or unknown id — start fresh */ }
       }
-      const s = await api.createSession('');
+      const s = await api.createSession('', WANTED_MODE());
       setSessionId(s.sessionId);
       setSnap(s);
-      try { window.sessionStorage.setItem('wt-session', s.sessionId); } catch (e) {}
+      try { window.sessionStorage.setItem(key, s.sessionId); } catch (e) {}
     };
     boot().catch((e) => { createdRef.current = false; fail(e); });
   }, [sessionId, setSnap]);
@@ -196,7 +260,17 @@ export default function AgentApp() {
       // Judged requirements cost a model call, so they are not re-run per step
       // — but leaving them "unverified" forever would be a rail full of
       // question marks. The moment the agent stops is when it is worth paying.
-      setSnap(await api.recheck(sessionId, true));
+      //
+      // There is nothing to re-verify in the control condition, and /recheck
+      // refuses it (409) rather than quietly doing nothing — so asking anyway
+      // ended every baseline run by dropping "this session is a baseline run"
+      // into the error banner, right where the participant was reading the
+      // agent's last step. The mode comes from the server's snapshot, which is
+      // the same thing every other branch on this screen trusts.
+      const s = snapRef.current;
+      if (!s || (s.mode || 'weighted') !== 'baseline') {
+        setSnap(await api.recheck(sessionId, true));
+      }
     } catch (e) { fail(e); } finally {
       runRef.current = false;
       setRunning(false);
@@ -323,6 +397,18 @@ export default function AgentApp() {
     return steer(msg);
   }, [sessionId, steer]);
 
+  /* A session's condition is fixed for its life, so this cannot flip the run
+     in front of you: it rewrites the hash and reloads, which boots the other
+     condition from a clean slate. Each condition keeps its own session in the
+     tab, so switching back returns to the run you left rather than discarding
+     it. The control is the setting picker in the chat header — the one place
+     it is offered, and it numbers the conditions rather than naming them. */
+  const switchMode = useCallback((target) => {
+    if (target === (snap ? snap.mode : WANTED_MODE())) return;
+    window.location.hash = hashForMode(window.location.hash, target);
+    window.location.reload();
+  }, [snap]);
+
   const toggleGate = useCallback(async () => {
     try { setSnap(await api.gate(sessionId, !snap.gateOn)); } catch (e) { fail(e); }
   }, [sessionId, snap, setSnap]);
@@ -400,8 +486,12 @@ export default function AgentApp() {
   }
 
   /* ------------------------------------------------------------ the screen */
+  /* The server's answer, not the URL: a session restored into this tab carries
+     the condition it was created in, and that is what the screen must match. */
+  const baseline = (snap ? snap.mode : WANTED_MODE()) === 'baseline';
+
   return (
-    <div className="wt4">
+    <div className="wt4" data-mode={baseline ? 'baseline' : 'weighted'}>
       {/* No title bar. Everything it held was either redundant (a status word
           next to a spinner), or a control nobody could explain to themselves
           (the finish gate) — that one now introduces itself in the stream, in
@@ -415,7 +505,7 @@ export default function AgentApp() {
           onRun={doRun}
           onPause={pause}
           onStep={doStep}
-          onGate={toggleGate}
+          onGate={baseline ? null : toggleGate}
           onContext={openContext}
           onExport={() => window.open(api.exportUrl(sessionId), '_blank')}
         />
@@ -427,9 +517,11 @@ export default function AgentApp() {
         </div>
       )}
       {net && !error && <div className="net">{net}</div>}
-      <div className="cols">
+      <div className="cols" data-panes={baseline ? 2 : 3}>
         <RunStream
           snap={snap}
+          mode={baseline ? 'baseline' : 'weighted'}
+          onSwitchMode={switchMode}
           focus={focus}
           running={running}
           pending={live}
@@ -448,18 +540,22 @@ export default function AgentApp() {
           selected={selected}
           focus={focus}
           onSelectReq={setSelected}
-          onFreeze={freeze}
-          onAnchor={anchoredEdit}
+          /* Freeze and anchored edits are steering. Without them the selection
+             toolbar has nothing to offer, and Workspace draws no toolbar. */
+          onFreeze={baseline ? null : freeze}
+          onAnchor={baseline ? null : anchoredEdit}
           onSave={saveFile}
         />
-        <RequirementRail
-          snap={snap}
-          selected={selected}
-          setSelected={setSelected}
-          onJump={jump}
-          onAction={requirementAction}
-          busy={busy}
-        />
+        {!baseline && (
+          <RequirementRail
+            snap={snap}
+            selected={selected}
+            setSelected={setSelected}
+            onJump={jump}
+            onAction={requirementAction}
+            busy={busy}
+          />
+        )}
       </div>
       {ctx && <ContextInspector ctx={ctx} onClose={() => setCtx(null)} />}
     </div>
@@ -469,7 +565,8 @@ export default function AgentApp() {
 /* Participants see: what the agent is doing, one Run/Pause, and the gate.
    Single-stepping and the session export are researcher tools — they live
    behind #agent/dev so the study screen stays a screen, not a cockpit. */
-function TopBar({ snap, title, running, busy, onRun, onPause, onStep, onGate, onContext, onExport }) {
+function TopBar({ snap, title, running, busy, onRun, onPause,
+                 onStep, onGate, onContext, onExport }) {
   const status = running ? 'running' : (snap ? snap.status : 'idle');
   const started = snap && snap.stepCount > 0;
   return (

@@ -29,9 +29,35 @@ def _session(required=True):
     return s, data
 
 
+class Withheld(Exception):
+    """A treatment-only route called against a baseline session."""
+
+
 def _fail(e, code=500):
+    # Every route funnels its exceptions through here, and a withheld route is
+    # not a server fault: it is the app saying no on purpose. Answering 500
+    # would put it in the error banner as "something broke".
+    if isinstance(e, Withheld):
+        return jsonify({"error": str(e)}), 409
     traceback.print_exc()
     return jsonify({"error": f"{type(e).__name__}: {e}"}), code
+
+
+def _weighted_only(s):
+    """The requirement machinery is the manipulation. A stray client — a stale
+    tab, a hash typed by hand, a bug in the picker — must not be able to hand
+    half of it to a baseline participant, so the routes that carry it refuse
+    rather than quietly doing nothing. Refusing is loud in the console and
+    visible in the logs; a silent no-op would look like a working screen."""
+    if s.mode == "baseline":
+        raise Withheld("this session is a baseline run: "
+                       "requirements, steering and the gate are not part of it")
+    return s
+
+
+@bp.errorhandler(Withheld)
+def _withheld(e):
+    return jsonify({"error": str(e)}), 409
 
 
 @bp.errorhandler(LookupError)
@@ -128,7 +154,12 @@ def attachment():
 def create_session():
     try:
         data = request.json or {}
-        s = sessions.create((data.get("brief") or "").strip())
+        # The condition is fixed here and nowhere else. An unknown value is not
+        # a silent fall-through to the treatment: sessions.create normalizes to
+        # "weighted", and the mode it settled on comes straight back in the
+        # snapshot so the client can render what it actually got.
+        s = sessions.create((data.get("brief") or "").strip(),
+                            mode=(data.get("mode") or "weighted"))
         return jsonify(s.snapshot())
     except Exception as e:                                    # noqa: BLE001
         return _fail(e)
@@ -168,8 +199,10 @@ def extract():
         data = request.json or {}
         brief = (data.get("brief") or "").strip()
         s = sessions.get(data.get("sessionId"))
-        if s is not None and brief:
-            s.brief = brief
+        if s is not None:
+            _weighted_only(s)
+            if brief:
+                s.brief = brief
         result = extract_mod.extract(brief or (s.brief if s else ""))
         if s is not None:
             s.questions = result["questions"]
@@ -224,6 +257,7 @@ def commit():
     agent until this happens."""
     try:
         s, data = _session()
+        _weighted_only(s)
         s.requirements = R.normalize_all(data.get("requirements"))
         s.questions = data.get("questions") or s.questions
         if data.get("brief"):
@@ -255,7 +289,11 @@ def message():
         s.status = "idle"
         s.log("user", text=text, highlights=data.get("highlights") or [])
 
-        if not s.requirements:
+        if s.mode == "baseline":
+            # No extraction: the brief goes to the agent as the user typed it,
+            # and the rail it would have filled is not on the screen.
+            s.brief = s.brief or text
+        elif not s.requirements:
             s.brief = s.brief or text
             result = extract_mod.extract(text)
             s.requirements = R.normalize_all(result["requirements"])
@@ -382,6 +420,7 @@ def steer():
     """A one-shot instruction injected at the head of the next step."""
     try:
         s, data = _session()
+        _weighted_only(s)
         text = (data.get("text") or "").strip()
         if not text:
             return jsonify({"error": "empty steer"}), 400
@@ -401,6 +440,7 @@ def steer():
 def gate():
     try:
         s, data = _session()
+        _weighted_only(s)
         s.gate_on = bool(data.get("on", not s.gate_on))
         s.log("gate-toggle", on=s.gate_on,
               blocking=[r["id"] for r in R.blocking(s.requirements)])
@@ -420,6 +460,7 @@ def requirement():
     of them logged, because how people manage the store is the study data."""
     try:
         s, data = _session()
+        _weighted_only(s)
         action = data.get("action")
         rid = data.get("id")
         target = next((r for r in s.requirements if r["id"] == rid), None)
@@ -492,6 +533,7 @@ def recheck():
     """Re-verify now. `judge: true` spends one LLM call on the Tier-2 ones."""
     try:
         s, data = _session()
+        _weighted_only(s)
         before = {r["id"]: (r.get("report") or {}).get("verdict")
                   for r in s.requirements}
         reports = verifier.verify(s, judge_pass=bool(data.get("judge")))

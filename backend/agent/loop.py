@@ -11,10 +11,28 @@ from . import requirements as R
 from . import tools
 from . import verifier
 
-SYSTEM = """You are a writing agent working in a small file workspace.
+# The agent's standing instructions, in two conditions.
+#
+# The study compares WeightText against a baseline that is the same model, the
+# same tools and the same screen with the requirement machinery removed — so
+# the prompt has to differ by exactly that machinery and nothing else. The
+# pieces below are composed twice rather than written out twice: a rule about
+# how to use edit_file is shared verbatim, and only the rules that talk about
+# checking, verdicts and requirements have a second version. What is NOT
+# withheld from the baseline is tool advice — copy the source before repairing
+# it, one repair per command — because a baseline that is badly prompted
+# measures prompt engineering, not the interface.
+#
+# The weighted composition below is byte-identical to the single SYSTEM string
+# that preceded the split, so every run measured before this change was
+# measured under the same prompt this one sends.
+
+_HEAD = """You are a writing agent working in a small file workspace.
 
 Rules of this workspace:
-- Exactly one file per deliverable, named after it (cover_letter.md,
+"""
+
+_FILE_RULES = """- Exactly one file per deliverable, named after it (cover_letter.md,
   recruiter_email.md). Start each file with a '# Title' heading line. Never keep
   the same content in two files — a duplicate makes every check ambiguous.
 - Three ways to change a file, and they do different jobs. edit_file replaces
@@ -25,28 +43,57 @@ Rules of this workspace:
 - read_file numbers the lines it returns. Copy an anchor for edit_file out of
   that listing rather than from memory, and strip the "12: " prefix — the
   numbers are the listing's, not the file's.
-- run_check runs a deterministic checker. It is free and it does not flatter
+"""
+
+_RUN_CHECK = """- run_check runs a deterministic checker. It is free and it does not flatter
   you. Run it after a substantive edit and before you try to finish.
-- Take exactly one action at a time and say, in one short sentence, why.
-- Do not claim a requirement is met. Make it checkable, then check it.
+"""
+
+_ONE_ACTION = """- Take exactly one action at a time and say, in one short sentence, why.
+"""
+
+_VERDICTS = """- Do not claim a requirement is met. Make it checkable, then check it.
 - Every edit comes back with the checker's verdicts and a "blocking finish"
   line. When it says nothing is blocking, run_check once and then finish. Do
   not keep polishing a package that already passes.
-- Close the run with the finish tool, never with a message. A reply is not an
+"""
+
+# The baseline's stopping rule. It has to say something, or the loop runs to
+# the turn cap on every task; what it must not do is point at a checker.
+_STOP = """- When the brief is done, finish. Do not keep polishing work that already
+  meets it.
+"""
+
+_CLOSE = """- Close the run with the finish tool, never with a message. A reply is not an
   ending: it stops the run without closing it, and leaves the work sitting at
   "in progress" with every requirement green. The one reason to reply instead
   of acting is being genuinely stuck — a requirement you cannot satisfy, or a
   decision only the user can make. Then say so in one sentence, and say what
   you need.
-- The user reads your messages beside the workspace, with every file already
+"""
+
+_CLOSE_BASELINE = """- Close the run with the finish tool, never with a message. A reply is not an
+  ending: it stops the run without closing it, and leaves the work sitting at
+  "in progress". The one reason to reply instead of acting is being genuinely
+  stuck — something the brief asks for that you cannot do, or a decision only
+  the user can make. Then say so in one sentence, and say what you need.
+"""
+
+_CHAT = """- The user reads your messages beside the workspace, with every file already
   open in front of them. Never paste a file's contents into one, in whole or
   in part. Say what you did, not what it says.
 """
 
+SYSTEM = (_HEAD + _FILE_RULES + _RUN_CHECK + _ONE_ACTION + _VERDICTS
+          + _CLOSE + _CHAT)
+
+SYSTEM_BASELINE = (_HEAD + _FILE_RULES + _ONE_ACTION + _STOP
+                   + _CLOSE_BASELINE + _CHAT)
+
 # Appended only when the shell is actually on (tools.shell_enabled). Rules for
 # a tool the model has not been given are worse than useless: it plans around
 # them and then cannot act.
-SHELL_RULES = """
+_SHELL_HEAD = """
 Working with a terminal:
 - run_command runs a shell command in the workspace. Reach for it when a
   program does the job better than retyping text does: transforming a data
@@ -54,26 +101,52 @@ Working with a terminal:
   just wrote. python3 and the usual text tools are there. pandas is not, and
   for a small table you do not want it — the standard library's csv module
   leaves the columns you were told not to touch exactly as they were.
-- Every file in the workspace is a deliverable and is checked as one. Helper
+"""
+
+_SHELL_SCRATCH = """- Every file in the workspace is a deliverable and is checked as one. Helper
   scripts, intermediates and scratch output belong in $SCRATCH, never here.
   Attachments are read-only at $ATTACHMENTS: read them there, never clean one
   in place — it is the only record of what the source said.
-- When a deliverable transforms an attached source — a cleaned table, a
+"""
+
+_SHELL_SCRATCH_BASELINE = """- Every file in the workspace is a deliverable. Helper scripts, intermediates
+  and scratch output belong in $SCRATCH, never here. Attachments are read-only
+  at $ATTACHMENTS: read them there, never clean one in place — it is the only
+  record of what the source said.
+"""
+
+_SHELL_COPY = """- When a deliverable transforms an attached source — a cleaned table, a
   revised document — begin by copying the source verbatim, then apply each
   repair to the copy as its own command. One-shot rewrites are where rows get
   dropped and reordered without anyone noticing, including you.
-- One repair per command, checked in between. The requirement panel beside
+"""
+
+_SHELL_ONE_REPAIR = """- One repair per command, checked in between. The requirement panel beside
   your workspace attributes every verdict to the step that caused it, so a
   script that does everything at once tells the person watching nothing about
   which change did what.
 """
 
+_SHELL_ONE_REPAIR_BASELINE = """- One repair per command. A script that does everything at once tells the
+  person watching nothing about which change did what.
+"""
+
+SHELL_RULES = (_SHELL_HEAD + _SHELL_SCRATCH + _SHELL_COPY + _SHELL_ONE_REPAIR)
+
+SHELL_RULES_BASELINE = (_SHELL_HEAD + _SHELL_SCRATCH_BASELINE + _SHELL_COPY
+                        + _SHELL_ONE_REPAIR_BASELINE)
+
 MAX_HISTORY_BLOCKS = 14
 
 
-def instructions():
-    """The agent's standing instructions for this server's configuration."""
-    return SYSTEM + (SHELL_RULES if tools.shell_enabled() else "")
+def instructions(mode="weighted"):
+    """The agent's standing instructions for this server's configuration and
+    this session's condition."""
+    baseline = mode == "baseline"
+    base = SYSTEM_BASELINE if baseline else SYSTEM
+    if not tools.shell_enabled():
+        return base
+    return base + (SHELL_RULES_BASELINE if baseline else SHELL_RULES)
 
 
 def _condense(messages):
@@ -117,7 +190,9 @@ def workspace_digest(session):
     att = session.attachments.meta()
     if att:
         lines.append("Attached by the user — read-only reference material, not part of")
-        lines.append("the deliverable and not seen by the checker. Use read_attachment:")
+        lines.append("the deliverable" + ("" if session.mode == "baseline"
+                                          else " and not seen by the checker")
+                     + ". Use read_attachment:")
         for a in att:
             lines.append(f"  {a['name']} — {a['lines']} lines, {a['chars']} characters")
         if tools.shell_enabled():
@@ -146,7 +221,7 @@ def build_messages(session):
     context inspector renders. Nothing is added anywhere else."""
     standing = R.standing_block(session.brief, session.requirements)
     digest = workspace_digest(session)
-    base = instructions()
+    base = instructions(session.mode)
     system = base + ("\n" + standing if standing else "") + "\n" + digest
     history, dropped = _condense(session.llm_messages)
     msgs = [{"role": "system", "content": system}] + history
@@ -228,6 +303,13 @@ def _summarize_step(session, name, args, meta, changed):
         if name != "run_command" or meta.get("kind") != "edit":
             return ("The command failed; the workspace is unchanged."
                     if name == "run_command" else "")
+    if session.mode == "baseline":
+        # Nothing checked this step, so there is nothing to say about it that
+        # the step's own observation does not already say. The line stays empty
+        # rather than reassuring: "everything looks met" is exactly the claim
+        # this condition exists to withhold, and a tool failure above has
+        # already had its say.
+        return (args.get("summary") or "").strip() if name == "finish" else ""
     if name == "run_check":
         c = R.counts(session.requirements)
         unchecked = c.get("unverified", 0) + c.get("partial", 0)
@@ -311,7 +393,7 @@ def step(session):
     print(f"[step] session={session.id} step={session.step_count + 1} "
           f"calling {llm.MODEL}…", flush=True)
     try:
-        msg = llm.chat(messages, tools=tools.schemas())
+        msg = llm.chat(messages, tools=tools.schemas(session.mode))
     except Exception as e:                                    # noqa: BLE001
         session.status = "paused"
         session.log("error", text=f"{type(e).__name__}: {e}")
@@ -323,11 +405,12 @@ def step(session):
 
     if not calls and not thought:
         # Neither a call nor a word. This is not the agent talking to the user,
-        # and it happens most often once every requirement is satisfied and the
-        # model has nothing left to say. Logged as speech it renders an empty
-        # bubble in the chat, and pressing continue only adds another one --
-        # the prompt is unchanged, so the next turn comes back just as empty.
-        # Name it for what it is, and give the next turn something to answer.
+        # and it happens most often right after a step that looks at the state
+        # -- run_check, a verifying command -- when the model finds nothing to
+        # change but has not decided to stop either. Logged as speech it
+        # renders an empty bubble in the chat, and a bare retry only adds
+        # another one: the prompt is unchanged, so the next turn comes back
+        # just as empty. Naming it in the history is what breaks the tie.
         session.llm_messages.append({
             "role": "user",
             "content": ("That turn was empty: no tool call and no message. If "
@@ -335,10 +418,18 @@ def step(session):
                         "next concrete action."),
         })
         session.status = "idle"
-        session.log("notice",
-                    text=("The agent returned an empty turn — nothing to do and "
-                          "nothing to say. Continue asks it again; if everything "
-                          "is satisfied, it should finish."))
+        # Recorded, not announced. The nudge above settles it within one turn
+        # -- across 76 runs this fired six times, never twice in a row, and the
+        # next turn was always a real action -- so the participant's chat has
+        # nothing to tell them: the run simply carries on, which is what the
+        # runner does with canContinue here. A warning for something that
+        # corrects itself before anyone can act on it teaches people to read
+        # the amber blocks as noise, and two of those are real. `trace` keeps
+        # it in session.json and the export, where the analysis wants it, and
+        # draws only under #dev.
+        session.log("trace", kind="empty-turn",
+                    text=("The model returned a turn with no tool call and no "
+                          "message; the loop asked it to finish or act."))
         session.save()
         return session.events[start_index:]
 
@@ -379,7 +470,13 @@ def step(session):
             observation, meta = tools.execute(session, name, args)
         gate_event = None
 
-        if name == "finish":
+        if name == "finish" and session.mode == "baseline":
+            # There is nothing to verify and nothing to hold the finish on.
+            # The agent's word that it is done is the whole of the baseline's
+            # stopping rule, which is the condition, not an oversight.
+            changed = []
+            session.status = "done"
+        elif name == "finish":
             # judge included: the gate must not wave tone requirements through
             # just because nobody had judged them yet
             changed = _verify_and_apply(session, judge=True)
@@ -394,6 +491,11 @@ def step(session):
                 gate_event = {"blocked": [r["id"] for r in blocked]}
             else:
                 session.status = "done"
+        elif session.mode == "baseline":
+            # No verifier, so no chips and no verdict lines appended to the
+            # observation. The agent sees what its own tool call returned and
+            # nothing else — which is the point of the comparison.
+            changed = []
         else:
             # Every successful edit is judged as well as code-checked. One
             # extra model call per step buys the thing the rail is for: each

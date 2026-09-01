@@ -46,6 +46,21 @@
 .wt4 .transport button:last-child { border-radius:0 4px 4px 0; }
 .wt4 .transport button:hover:not(:disabled) { color:var(--ink); background:var(--surface-3); }
 .wt4 .transport button.on { color:var(--accent); border-color:var(--accent-line); background:var(--accent-soft); font-weight:600; }
+/* The setting picker, in the chat header. Sized down to sit inside a 36px
+   column head without pushing it taller, and quiet enough that the eye reads
+   the chat first — it is set once at the start and then left alone. */
+.wt4 .setting { display:flex; align-items:center; gap:6px; }
+.wt4 .setting > span {
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--ink-3);
+}
+.wt4 .setting select {
+  border:1px solid var(--line-2); border-radius:5px; padding:2px 6px;
+  font-family:var(--sans); font-size:12px; line-height:1.5;
+  background:var(--surface); color:var(--ink-2); outline:none; cursor:pointer;
+}
+.wt4 .setting select:hover { color:var(--ink); background:var(--surface-3); }
+.wt4 .setting select:focus-visible { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
 .wt4 .meters { margin-left:auto; display:flex; align-items:center; gap:14px; font-family:var(--mono); font-size:11px; color:var(--ink-3); }
 .wt4 .meters b { color:var(--ink-2); font-weight:600; }
 .wt4 .gate {
@@ -61,6 +76,10 @@
 
 /* ---------------- columns ---------------- */
 .wt4 .cols { flex:1; display:grid; grid-template-columns:minmax(300px,.9fr) minmax(360px,1.45fr) minmax(340px,1fr); min-height:0; }
+/* Baseline: the same screen with the rail gone. The two panes that remain take
+   the width it had rather than leaving a gap where it used to be — a condition
+   should read as a screen in its own right, not as this one with a hole in. */
+.wt4 .cols[data-panes="2"] { grid-template-columns:minmax(340px,1fr) minmax(420px,1.3fr); }
 .wt4 .col { min-width:0; display:flex; flex-direction:column; min-height:0; background:var(--surface); }
 .wt4 .col + .col { border-left:1px solid var(--line-2); }
 .wt4 .colhead {
@@ -125,6 +144,9 @@
 .wt4 .notice { font-family:var(--mono); font-size:11px; padding:5px 9px; border-radius:4px; border-left:2px solid var(--warn); background:var(--warn-soft); color:var(--warn); }
 .wt4 .notice[data-kind="error"] { border-left-color:var(--bad); background:var(--bad-soft); color:var(--bad); }
 .wt4 .notice[data-kind="gate"] { border-left-color:var(--bad); background:var(--bad-soft); color:var(--bad); }
+/* #dev only, and deliberately not amber: a trace is the record of something
+   the run already handled, so it reads as a footnote next to the notices. */
+.wt4 .trace { font-family:var(--mono); font-size:10.5px; padding:3px 9px; color:var(--ink-3); border-left:2px solid var(--line-2); }
 /* The agent signs off in prose, but often pastes the file it wrote. Left to
    collapse, that arrives as one unreadable run-on line — the same fault the
    user's own turn had. */
@@ -414,6 +436,11 @@
 @media (max-width:1180px) {
   .wt4 .cols { grid-template-columns:1fr 1fr; }
   .wt4 .cols > .col:nth-child(2) { grid-row:2; grid-column:1 / -1; border-left:none; border-top:1px solid var(--line-2); }
+  /* Two panes already fit side by side; the stacking above exists to rescue
+     three, and applying it here would drop the workspace below a half-empty
+     chat column for no reason. */
+  .wt4 .cols[data-panes="2"] { grid-template-columns:1fr 1fr; }
+  .wt4 .cols[data-panes="2"] > .col:nth-child(2) { grid-row:auto; grid-column:auto; border-left:1px solid var(--line-2); border-top:none; }
 }
 
 /* ---- benchmark task picker (brief stage) ------------------------------- */

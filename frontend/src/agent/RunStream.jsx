@@ -252,8 +252,38 @@ const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name,
 });
 
 
+/* The condition, as a setting rather than as a name. A participant should be
+   able to find and change it — it is the one control the study asks them to
+   set — without being told which of the two is the treatment, so the options
+   are numbered and the screen never says "baseline" anywhere.
+
+   SETTINGS is the numbering, in order. Changing it renames what participants
+   see; it does not change what the server is asked for. */
+const SETTINGS = [
+  { mode: 'weighted', label: 'Setting 1' },
+  { mode: 'baseline', label: 'Setting 2' },
+];
+
+function SettingPicker({ mode, onSwitch }) {
+  return (
+    <label className="setting">
+      <span>Setting</span>
+      <select
+        value={mode}
+        onChange={(e) => onSwitch(e.target.value)}
+        title="Switching starts this setting's own session. The one you leave is kept, and comes back if you switch back."
+      >
+        {SETTINGS.map((s) => (
+          <option key={s.mode} value={s.mode}>{s.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 export default function RunStream({ snap, focus, running, pending, busy, outbox, onRun, onPause,
-                                    onSend, onAnswer, onSelectReq, onJump, selected }) {
+                                    onSend, onAnswer, onSelectReq, onJump, selected,
+                                    mode, onSwitchMode }) {
   const [openSteps, setOpenSteps] = useState(() => new Set());
   const [text, setText] = useState('');
   // The benchmark tasks are served from disk, not bundled: several ship
@@ -336,7 +366,14 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
 
   return (
     <div className="col">
-      <div className="colhead">Chat</div>
+      <div className="colhead">
+        Chat
+        {onSwitchMode && (
+          <div className="right">
+            <SettingPicker mode={mode} onSwitch={onSwitchMode} />
+          </div>
+        )}
+      </div>
       <div className="scroll" ref={scrollRef}>
         <div className="stream">
           {/* An empty session is a conversation that has not started, not a
@@ -486,6 +523,12 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                 );
               case 'notice':
                 return <div className="notice" key={ev.i}>{ev.text}</div>;
+              case 'trace':
+                // Something the run recovered from on its own, kept for the
+                // record. Amber is for what a person can act on; this is not
+                // that, so it stays out of the participant's chat entirely and
+                // shows only where the raw observations already do.
+                return DEV ? <div className="trace" key={ev.i}>{ev.text}</div> : null;
               case 'error':
                 return <div className="notice" data-kind="error" key={ev.i}>{ev.text}</div>;
               case 'assistant':

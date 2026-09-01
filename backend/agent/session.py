@@ -22,9 +22,20 @@ RUNS_DIR = os.environ.get(
 _SESSIONS = {}
 
 
+# The two conditions this app is run in, decided when the session is created
+# and never afterwards. "weighted" is WeightText: the brief is extracted into a
+# requirement list, every step is verified, the gate holds finish. "baseline"
+# is the same model, the same tools and the same screen with all of that
+# removed — the comparison the study rests on, so it is a property of the
+# session rather than a switch anyone can flip mid-run, and it is written into
+# the event log and session.json so no run's condition has to be inferred.
+MODES = ("weighted", "baseline")
+
+
 class Session:
-    def __init__(self, brief="", session_id=None):
+    def __init__(self, brief="", session_id=None, mode="weighted"):
         self.id = session_id or uuid.uuid4().hex[:12]
+        self.mode = mode if mode in MODES else "weighted"
         self.brief = brief or ""
         self.root = os.path.join(RUNS_DIR, self.id)
         self.workspace = Workspace(os.path.join(self.root, "workspace"))
@@ -41,7 +52,8 @@ class Session:
         self.llm_messages = []
         self.step_count = 0
         self.status = "idle"          # idle | running | paused | done
-        self.gate_on = True
+        # Nothing holds the baseline's finish: there is nothing to hold it on.
+        self.gate_on = self.mode == "weighted"
         self.pending_steer = None
         self.questions = []
         self.unmapped = []
@@ -60,6 +72,7 @@ class Session:
     def snapshot(self):
         return {
             "sessionId": self.id,
+            "mode": self.mode,
             "brief": self.brief,
             "status": self.status,
             "stepCount": self.step_count,
@@ -79,7 +92,8 @@ class Session:
         os.makedirs(self.root, exist_ok=True)
         with open(os.path.join(self.root, "session.json"), "w", encoding="utf-8") as fh:
             json.dump({
-                "sessionId": self.id, "brief": self.brief, "created": self.created,
+                "sessionId": self.id, "mode": self.mode, "brief": self.brief,
+                "created": self.created,
                 "status": self.status, "stepCount": self.step_count,
                 "requirements": self.requirements, "events": self.events,
                 "questions": self.questions,
@@ -88,10 +102,10 @@ class Session:
             }, fh, ensure_ascii=False, indent=2)
 
 
-def create(brief=""):
-    s = Session(brief)
+def create(brief="", mode="weighted"):
+    s = Session(brief, mode=mode)
     _SESSIONS[s.id] = s
-    s.log("session", brief=brief)
+    s.log("session", brief=brief, mode=s.mode)
     s.save()
     return s
 
@@ -119,7 +133,8 @@ def _load(session_id):
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-        s = Session(brief=data.get("brief", ""), session_id=session_id)
+        s = Session(brief=data.get("brief", ""), session_id=session_id,
+                    mode=data.get("mode") or "weighted")
         s.requirements = data.get("requirements") or []
         s.events = data.get("events") or []
         s.questions = data.get("questions") or []
@@ -134,7 +149,7 @@ def _load(session_id):
             s.llm_messages = [{"role": "user", "content": s.brief}]
         s.created = data.get("created", s.created)
         _SESSIONS[session_id] = s
-        print(f"[session] restored {session_id} from disk", flush=True)
+        print(f"[session] restored {session_id} ({s.mode}) from disk", flush=True)
         return s
     except Exception as e:                                    # noqa: BLE001
         print(f"[session] could not restore {session_id}: {e}", flush=True)
