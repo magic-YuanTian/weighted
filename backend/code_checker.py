@@ -103,7 +103,7 @@ def _cap(params, *keys):
 PROPS = ("naming", "defines", "imports", "assigned_once", "module_level",
          "initializes", "uses", "forbids", "forbids_names", "single_return",
          "max_function_lines", "max_line_length", "no_blank_lines_in_body",
-         "docstrings", "max_classes")
+         "docstrings", "max_classes", "max_functions", "max_total_lines")
 
 
 # ---------------------------------------------------------------- offsets
@@ -402,7 +402,12 @@ def _initializes(tree, params, source, starts):
     solution into a reported contradiction."""
     name, why = _wanted_name(params, "name")
     call, call_why = _wanted_name(params, "call", "class")
+    # A brief that says "using ['dwa', 'info'] for initialization" names two
+    # arguments, and the extractor hands them over as one string: "dwa, info".
+    # Looking for a single argument spelled that way finds nothing, and a
+    # correct call is reported as built from the wrong thing.
     arg = params.get("arg") or ""
+    wanted_args = [a.strip() for a in str(arg).split(",") if a.strip()]
     if name is None or call is None:
         return "unverified", (why or call_why
                               or "needs both a name and the class to instantiate"), []
@@ -419,13 +424,24 @@ def _initializes(tree, params, source, starts):
             or getattr(getattr(value, "func", None), "attr", None)
         if not isinstance(value, ast.Call) or called != call:
             continue
-        if not arg:
+        if not wanted_args:
             matches.append(node)
             continue
         names = {a.id for a in value.args if isinstance(a, ast.Name)}
         names |= {k.value.id for k in value.keywords
                   if isinstance(k.value, ast.Name)}
-        (matches if arg in names else wrong_arg).append(node)
+        # A brief that says "using ['dwa', 'info'] for initialization" does not
+        # say whether those are variables or values, so a literal that spells
+        # the argument answers it as well as a name that holds it. Demanding
+        # the Name failed AnalyzeDwa("dwa", "info") — the same over-reading
+        # this function's docstring already records once.
+        names |= {a.value for a in value.args
+                  if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+        names |= {k.value.value for k in value.keywords
+                  if isinstance(k.value, ast.Constant)
+                  and isinstance(k.value.value, str)}
+        (matches if all(a in names for a in wanted_args)
+         else wrong_arg).append(node)
 
     if matches:
         return "satisfied", f"{name} = {call}({arg})".replace("()", "(…)"), \
@@ -565,6 +581,30 @@ def _max_line_length(tree, params, source, starts):
         [_line_span(starts, n) for n, _ in over[:6]]
 
 
+def _max_total_lines(tree, params, source, starts):
+    """How long the whole file is — not how long one line or one body is.
+
+    The third member of a family that reads alike and checks nothing alike.
+    "your answer in total should not exceed 15 lines" arrived as
+    max_line_length {"max": 15} and failed a correct file for having a 35-
+    character line in it. A cap on the file's lines, a cap on a body's lines
+    and a cap on a line's characters are three different claims.
+
+    Trailing blank lines are not part of the answer, so they do not count; a
+    blank line between two statements is a line the author wrote, so it does.
+    """
+    cap = _cap(params, "max", "lines")
+    if cap is None or cap <= 0:
+        return "unverified", "no line cap given", []
+    lines = source.split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if len(lines) <= cap:
+        return "satisfied", f"{len(lines)} line(s), cap is {cap}", []
+    return "violated", f"{len(lines)} lines, cap is {cap}", \
+        [_line_span(starts, n) for n in range(cap + 1, min(len(lines), cap + 7) + 1)]
+
+
 def _no_blank_lines_in_body(tree, params, source, starts):
     lines = source.split("\n")
     blanks = []
@@ -615,6 +655,25 @@ def _docstrings(tree, params, source, starts):
         [_span(starts, n) for _, n in (missing + multiline)[:6]]
 
 
+def _max_functions(tree, params, source, starts):
+    """How many functions the file defines — not how long any of them is.
+
+    These two were one prop for a while, and the collision was not theoretical:
+    "your code should not have more than 1 functions" came back as
+    max_function_lines {"max": 1} and failed a correct three-line function for
+    being three lines long. A cap on a count and a cap on a body are different
+    claims, and a brief that states one must not be checked against the other.
+    """
+    cap = _cap(params, "max")
+    functions = _functions(tree)
+    if cap is None or cap < 0:
+        return "unverified", "no function cap given", []
+    if len(functions) <= cap:
+        return "satisfied", f"{len(functions)} function(s), cap is {cap}", []
+    return "violated", f"{len(functions)} functions, cap is {cap}", \
+        [_span(starts, n) for n in functions[:6]]
+
+
 def _max_classes(tree, params, source, starts):
     cap = _cap(params, "max")
     classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
@@ -642,4 +701,6 @@ _PROPS = {
     "no_blank_lines_in_body": _no_blank_lines_in_body,
     "docstrings": _docstrings,
     "max_classes": _max_classes,
+    "max_functions": _max_functions,
+    "max_total_lines": _max_total_lines,
 }

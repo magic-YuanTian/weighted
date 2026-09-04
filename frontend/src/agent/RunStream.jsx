@@ -97,9 +97,17 @@ const StepCard = React.memo(function StepCard({ ev, open, onToggle, onSelectReq,
         <span className="act">{describeStep(ev)}</span>
         <ChipRow chips={ev.chips} onSelectReq={onSelectReq} />
       </div>
+      {/* The agent says why it is about to do a thing, in its own words, on
+          every step. That sentence used to live behind the caret, so the run
+          read as a list of verbs — "Revised the biography", "Ran a command" —
+          and a watcher could see what was touched without ever learning what
+          the agent thought it was doing. It is the one part of a step that is
+          addressed to a person, so it belongs in the stream, not in a drawer.
+          The drawer keeps what is addressed to a reader who went looking: the
+          checker's own words and, in dev, the raw observation. */}
+      {ev.thought && <div className="said">{ev.thought}</div>}
       {open && (
         <div className="body">
-          {ev.thought && <div>{ev.thought}</div>}
           {ev.summary && (
             <div className="note">
               {ev.summary.split('\n').map((line, i) => <div key={i}>{line}</div>)}
@@ -304,6 +312,35 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
   const bottomRef = useRef(null);
   const events = (snap && snap.events) || [];
 
+  /* What the run offers when it is not running. All of it belongs at the FOOT
+     of the stream: that is where the last thing said is, where the scroll
+     lands after every update, and where the eye already is. "Start the agent"
+     spent a version above the conversation — above the user's own message, on
+     a pane that auto-scrolls to the bottom — which is to say off-screen, on a
+     screen whose only instruction was to press it.
+
+     Two ways to arrive with a list and no work done: the staged flow
+     (#agent/review) commits before any message exists, and the ordinary flow
+     stops after extracting from the first one. Both want the same button. */
+  let idleControl = null;
+  if (snap && snap.status !== 'done') {
+    if (events.some((e) => e.type === 'step')) {
+      idleControl = (
+        <div className="thinking" data-idle="true">
+          <button className="linkbtn" onClick={onRun}>continue</button>
+        </div>
+      );
+    } else if (events.some((e) => e.type === 'commit' || e.type === 'extracted')) {
+      idleControl = (
+        <div className="kickoff">
+          <button className="startbtn" onClick={onRun} disabled={running || !!busy}>
+            Start the agent
+          </button>
+        </div>
+      );
+    }
+  }
+
   const firstUser = events.find((e) => e.type === 'user');
   const firstUserIndex = firstUser ? firstUser.i : -1;
 
@@ -377,12 +414,10 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
       <div className="scroll" ref={scrollRef}>
         <div className="stream">
           {/* An empty session is a conversation that has not started, not a
-              form waiting to be filled: say what to type, and get out of the
-              way. Requirements are extracted from this first message. */}
+              form waiting to be filled: the composer's placeholder says what
+              to type. Requirements are extracted from this first message. */}
           {!events.some((e) => e.type === 'user') && !pending && !outbox && (
             <div className="kickoff">
-              <span>Describe the task. The agent starts working on it, and the
-                requirements it must meet appear on the right.</span>
               {tasks.length > 0 && (
                 <div className="taskpicker">
                   <label htmlFor="taskpick">Benchmark task</label>
@@ -402,16 +437,6 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                       </option>
                     ))}
                   </select>
-                  {picked && (() => {
-                    const t = tasks.find((x) => x.id === picked);
-                    return t ? (
-                      <p className="taskmeta">
-                        <span>{t.source}</span>
-                        <span>{t.words.toLocaleString()} words</span>
-                        <em>{t.note}</em>
-                      </p>
-                    ) : null;
-                  })()}
                 </div>
               )}
               <button className="linkbtn" onClick={() => { setText(PILOT); setPicked(''); }}>
@@ -419,17 +444,6 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
               </button>
             </div>
           )}
-          {/* the staged flow (#agent/review) commits requirements before any
-              message exists, so it still needs an explicit start */}
-          {events.some((e) => e.type === 'commit')
-            && !events.some((e) => e.type === 'step') && !pending && (
-            <div className="kickoff">
-              <button className="startbtn" onClick={onRun} disabled={running || !!busy}>
-                Start the agent
-              </button>
-            </div>
-          )}
-
           {events.map((ev) => {
             switch (ev.type) {
               case 'user':
@@ -549,8 +563,15 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                 // what was taken from the message, and what is still unclear
                 return (
                   <React.Fragment key={ev.i}>
-                    <div className="inject">
-                      Starting on it. The requirements to meet are on the right.
+                    {/* The agent talking, so it is dressed as the agent
+                        talking: 13px prose in the same bubble its closing
+                        message uses. It spent a version in `.inject` — the
+                        11px mono label built for "committed 5 requirements" —
+                        which put the one sentence a person has to read at the
+                        size reserved for machine notes. */}
+                    <div className="assistant">
+                      Here is what I read the task as asking for — the list is on
+                      the right, and you can edit it. Start me when it looks right.
                     </div>
                     {(snap.questions || []).map((q) => (
                       <div key={q.id} className={`qcard ${q.answer ? 'done' : ''}`}>
@@ -589,11 +610,7 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                 <button className="linkbtn" onClick={onPause}>pause</button>
               )}
             </div>
-          ) : (events.some((e) => e.type === 'step') && snap && snap.status !== 'done' && (
-            <div className="thinking" data-idle="true">
-              <button className="linkbtn" onClick={onRun}>continue</button>
-            </div>
-          ))}
+          ) : idleControl}
           <div ref={bottomRef} />
         </div>
       </div>

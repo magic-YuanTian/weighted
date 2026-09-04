@@ -10,7 +10,12 @@ user always sees what is met, what is not, and which step made it so.
 - **Extract** — the first chat message is parsed into a requirement list
   (length limits, banned/required phrases, structural rules, tone, process
   rules). Each requirement stays linked to the sentence it came from, and the
-  list is fully editable: add, reword, delete.
+  list is fully editable: add, reword, delete. The run stops there and waits to
+  be started — that first list is the thing the work will be measured against,
+  and it should be read before there is work to read it against. Only there:
+  every later message goes straight to an agent already working. (This is not
+  the `#agent/review` condition, which is a separate screen before the session
+  exists; this is the ordinary flow pausing once.)
 - **Verify** — after every agent step, requirements are re-checked.
   Deterministic properties (word counts, phrases, structure) are checked by
   code; subjective ones (tone, content) are judged by the model. Every verdict
@@ -27,6 +32,9 @@ user always sees what is met, what is not, and which step made it so.
       llm_api.py       model access — the single place a model is wired in
       agent_routes.py  HTTP surface: /api/agent/*
       checker.py       deterministic text checks
+      code_checker.py  deterministic checks on a Python deliverable
+      table_checker.py deterministic checks on a CSV deliverable, read
+                       against the source table it was made from
       setup_tasks.py   fetches the six benchmark tasks (see below)
       agent/           extraction, verification, tools, the step loop
       tasks/           the fetched tasks, their attachments and the
@@ -128,85 +136,123 @@ supply their own credentials and the API needs a rate limit.
 
 ### Benchmark tasks (optional)
 
-The composer offers a picker of six evaluation tasks, in three matched pairs,
-plus a warm-up. They are not in this repository: AutoDCWorkflow ships without a
-licence file, so nothing is redistributed here. Fetch and assemble them once:
+The composer offers a picker of six evaluation tasks: three domains, two
+instances each. They are not in this repository — two of the three source
+benchmarks ship without a licence file, so nothing is redistributed here. Fetch
+and assemble them once:
 
     cd backend && ../.venv/bin/python setup_tasks.py
 
-| # | Task | Artifact | What it is for |
-|---|------|----------|----------------|
-| 0 | Warm-up (AutoDCWorkflow p148) | 20-row table | the tutorial sitting — converges unattended |
-| 1-2 | LongWeave CODE_FIXING/4k | 352- and 347-line Python file | flake8 grades it, and its rules break each other |
-| 3-4 | LongWeave SALES_REPORT/2k | 300-row table, 2,048-word report | 30 gold figures the report has to get right |
-| 5-6 | AutoDCWorkflow menu p13, p28 | 100 x 20 and 100 x 21 tables | the columns nobody asked you to touch |
+| # | Task | Domain | Artifact | Reqs | What the agent's own run produced | How that was checked |
+|---|------|--------|----------|------|------|------|
+| 1 | CodeIF 358 | Code generation | longest subarray not divisible by k | 14 | **wrong** — returned 3 for `[-5,1,0], k=4` where the answer is 2; a second run left a file that does not parse | executed against a brute force |
+| 2 | CodeIF 1087 | Code generation | 2×N tilings with dominos and trominos | 16 | **wrong** — 12, 28, 65 for N=4,5,6 where the answers are 11, 24, 53 | executed against known counts |
+| 3 | AutoDCWorkflow menu p26 | Data wrangling | 100 × 21 table, dates in four formats | 11 | **wrong** in 2 runs of 3, in the same 9 cells — `1949-23-12` left as written where the answer is `1949-12-23` | gold table, cell by cell |
+| 4 | AutoDCWorkflow menu p18 | Data wrangling | 100 × 20 table, 2 dirty columns | 17 | **wrong** — a placeholder uppercased where the brief empties it | gold table, cell by cell |
+| 5 | LongWeave KG_TO_TEXT #1 | Writing | 2,048-word biography from 119 facts | 7 | **wrong** — 2,372 and 2,393 words against a 2,000–2,100 budget | word count |
+| 6 | LongWeave KG_TO_TEXT #6 | Writing | 2,048-word biography from 81 facts | 6 | **wrong** in 3 runs of 3 — 1,881 and 3,661 words against a 2,000–2,100 budget; the one in budget repeats itself across 31 paragraphs | word count, and read |
 
-Every task attaches its source rather than pasting it into the brief, so the
-requirement checker never sees the data. Gold answers land in
-`backend/tasks/gold/` and are never attached to a session — the agent has no
-route to them through the tools, though its shell can still walk the
-filesystem, so treat that directory as out of bounds rather than sealed.
+Two rules picked these, and both are measured. **Requirements**: how many chips
+the rail holds — a list nobody can read is a screen nobody uses, so nothing
+above twenty survives. Each count is the median of three runs of the real
+extractor over the brief the script writes. **What the agent's own run
+produced**: the real agent is run over the brief with nobody steering it until
+it stops, and then the *deliverable* is checked against ground truth — programs
+executed against known answers, tables compared with the benchmark's gold table
+cell by cell, biographies counted and read. A task whose deliverable comes out
+correct is finished, and the study has nothing to ask about it, whatever the
+requirement list says.
+
+That last distinction is not pedantic. Checking the deliverable rather than the
+verdicts is what removed the previous task 1, task 4 and task 5 from this set:
+all three were being reported as unfinished while what the agent had actually
+written was right. It is also what keeps task 2 in: that one stops with every
+chip green on a tiling count that is wrong.
+
+Tasks 1-2 replace LongWeave CODE_FIXING/4k, which was dropped for being
+unreadable — a 352-line broken Python file is not something a participant can
+hold in their head, and the benchmark's smaller tiers do not help, because
+LongWeave sizes the *output*: CODE_FIXING/1k still has a median of 223 lines.
+CodeIF puts the difficulty in a constraint list instead of a wall of code, and
+it also closes the gap this file used to name as the highest-value change left:
+every task in that set sent **100%** of its requirements to the judge, where
+the CodeIF pair sends most of them to a parser.
+
+The screen ruled out more than it kept, and executing the output is what ruled
+most of it out. Eleven CodeIF instances produced code that passes an
+independent oracle — 630, 652, 682, 683, 687, 744, 851, 933, 957, 975 among
+them — including the prime-counting thread that was task 1 for a day and came
+back correct three runs out of three. CodeIF 891 is wrong but only in the
+fourth decimal (it returns −0.16952 for the minimum of GeLU, which is
+−0.16997), too fine for anyone to see. 367/738/745/1034/1075 are over the
+twenty-requirement cap. Three menu instances — p4, p9 and p12 — were repaired
+**perfectly**, cell for cell against gold and with the right answer; what
+separates p13 and p18 is the width of the repair, 97 and 96 changed cells with
+named corrections inside a mechanical rule. And KG_TO_TEXT #0, task 5 for a
+day, wrote a 2,009-word biography with every claim traceable; 81 facts in a
+2,000-word budget does not strain, which is why task 5 is now the 119-fact row.
+
+**`backend/table_checker.py`** decides what a wrangling brief promises about its
+source table — keep every row, keep the order, keep the header, change only
+these columns, uppercase this column, report this count — by comparing the
+deliverable with the attachment. It is the one check in the codebase that is
+handed source material, which crosses the line `tools.Attachments` draws on
+purpose; a relational promise is the only thing that cannot be checked on the
+other side of it. The gold table is never involved. Rows 3 and 4 above are the
+before and after: the same two tasks previously produced ten false verdicts
+between them on deliverables identical to the benchmark's gold table, and p13's
+single verdict now is a real error (three stray cells in a frozen column) that
+nothing had ever caught.
+
+**`loop._stuck`** pauses a run after three edits that leave the same requirement
+red, because either the agent cannot settle it or the verdict is wrong and both
+want a person. It matters because `finish` is rejected while anything is
+violated, so before this a false verdict made an unattended run
+non-terminating — task 5 spent forty steps editing a biography that was already
+finished.
+
+Three older checker defects the screen turned up have also been fixed. A brief that says
+"variable x should not be a global variable" states a ban the checker has no
+property for — there is no negated `module_level`, no negated `assigned_once` —
+and the extractor answered it with the positive property, so correct code was
+reported as violating it and no edit could settle the chip; it appeared in four
+of the eleven CodeIF instances run against the agent. `extract._grounded` now
+routes a negated presence-property to the judge, and the same guard catches
+"define an interface named X", which names no Python construct and was failing a
+class of that exact name. `initializes` now accepts a literal spelling the
+argument and an argument list, so `AnalyzeDwa("dwa", "info")` is no longer
+reported as not built from `dwa`. The cost lands on **code%**: those guards move
+two to three requirements per CodeIF brief off the parser and onto the judge.
+
+What is left. The judge still cannot read a 100-row table, but on the wrangling
+pair it is no longer asked to: the relational requirements go to the parser now,
+and what remains for it there is the prose answer. The two places it is still
+load-bearing and still wrong are task 5, where it reads "the spousal
+relationship beginning on 1992-07-05" as an inference from a triple that says
+`spouse of start date - 1992-07-05`, and task 2, where it passed code that
+computes the wrong answer.
+
+Reference material is attached rather than pasted into the brief, so the
+requirement checker never sees it — a table cannot be counted by a word limit,
+and it is what keeps the writing pair's list at six while its work is 81 facts
+long. Gold answers land in `backend/tasks/gold/` and are never attached to a
+session — the agent has no route to them through the tools, though its shell
+can still walk the filesystem, so treat that directory as out of bounds rather
+than sealed.
 
 This writes `backend/tasks/`, which is git-ignored. Instances are pinned — by
-purpose id upstream, and for LongWeave by ordinal within a (task, tier) group —
-so re-running reproduces the same six tasks. The 224 MB LongWeave file is
-streamed once and read only as far as the last row needed (~60 MB of it).
+question id for CodeIF, by purpose id for AutoDCWorkflow, and for LongWeave by
+ordinal within a (task, tier) group — so re-running reproduces the same six.
+The 224 MB LongWeave file is streamed once and read only as far as the last row
+needed, which is now the KG pair alone.
 
 Skip this and the app still runs: `/api/agent/presets` returns an empty list
 and the picker hides itself. The backend reads the directory per request, so
 no restart is needed after running it — reload the page and the tasks are
 there.
 
-`setup_tasks.py`'s docstring carries the measurements these six were chosen on
-and what the old set failed.
-
-## The two conditions
-
-A session is created in one of two modes, and the mode is fixed for its life.
-
-| | `#agent/s1` — weighted | `#agent/s2` — baseline |
-|---|---|---|
-| model, tools, workspace, chat | same | same |
-| brief extracted into a requirement list | yes | no |
-| every step verified, chips and evidence | yes | no |
-| highlight to steer, freeze a span | yes | no |
-| finish gate | yes | no |
-| `run_check` tool | offered | withheld |
-
-The baseline is the control the study rests on, so it is enforced at the
-server, not drawn on the client: `/session` records the mode, `/requirement`,
-`/steer`, `/gate`, `/recheck`, `/commit` and `/extract` answer **409** on a
-baseline session, and the mode is written into the `session` event and into
-`session.json` so no run's condition has to be inferred afterwards.
-
-The prompts differ by exactly the requirement machinery and nothing else. The
-weighted composition in `backend/agent/loop.py` is byte-identical to the single
-prompt that preceded the split, so runs measured before it are comparable; the
-baseline drops the `run_check` rule, the "do not claim a requirement is met"
-rule and the verdict/gate rule, and keeps every rule about how to use the
-tools — a baseline that is prompted badly measures prompt engineering, not the
-interface.
-
-Switching the hash resumes nothing across conditions: sessions are keyed per
-mode in the tab, and the server's answer decides what the screen draws.
-
-The switch itself is a **Setting** dropdown in the chat header, on the screen
-in both conditions: `Setting 1` is weighted, `Setting 2` is baseline. It is
-numbered rather than named because a participant has to be able to find and
-change the setting without being told which of the two is the treatment. It
-cannot flip the run in front of you — a session's condition is fixed when it is
-created — so it rewrites the hash and reloads into the other one, where the tab
-keeps its own session.
-
-The URL is numbered for the same reason, and it is the same control by another
-route: typing `#agent/s2` and picking `Setting 2` do the same thing. Both
-settings carry a token, because a bare `#agent` sitting beside an `#agent/s2`
-is a tell of its own — the one without a flag reads as the ordinary version,
-and so as the treatment — and a bare `#agent` is rewritten to `#agent/s1` on
-arrival. The hash used to spell the condition out, and `#agent/baseline` is
-still *read* so a bookmark resolves to the condition it was saved for; it is
-never written, and `normalizeHash` replaces it (via `replaceState`, so the word
-is not one press of the back button away) before the screen is drawn.
+`setup_tasks.py`'s docstring carries the measurements these six were chosen on,
+what each rejected candidate failed, and every edit made to a benchmark brief.
 
 ## Notes
 

@@ -77,6 +77,9 @@ function methodSentence(r) {
     if (r.type === 'lexical-require' || r.type === 'preserve') {
       return 'The text is checked for these phrases after every change.';
     }
+    if (r.type === 'table-prop') {
+      return 'The table is compared with the attached source after every change.';
+    }
     return 'Checked automatically after every change.';
   }
   if (r.verify === 'rule') return "Checked from the agent's steps, not from the text.";

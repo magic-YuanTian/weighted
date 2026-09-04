@@ -6,6 +6,9 @@ verified before the next one is planned, and nothing depends on a streaming
 transport surviving a proxy.
 """
 
+import os
+import re
+
 from . import llm
 from . import requirements as R
 from . import tools
@@ -373,6 +376,66 @@ def _verify_and_apply(session, judge=False):
     return changed
 
 
+# How many edits a requirement may survive before the loop gives up on it.
+STUCK_AFTER = int(os.environ.get("WEIGHTTEXT_STUCK_AFTER", "3"))
+
+
+def _slug(name):
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _stuck(session, limit=None):
+    """Requirements that are still violated after `limit` edits aimed at them.
+
+    An unattended run can spend its whole budget on one requirement it is never
+    going to settle. That happened for real: a run edited a finished biography
+    for forty more steps because the judge would not accept "the spousal
+    relationship beginning on 1992-07-05" as a reading of the triple `spouse of
+    start date - 1992-07-05`, and `finish` is rejected while anything is
+    violated, so there was no way out of it.
+
+    Counted from the event log rather than from a field on the session, so a
+    reloaded session gets the same answer. An edit "aimed at" a requirement is
+    simply any successful edit: what matters is that three of them went by and
+    the verdict never turned.
+    """
+    limit = STUCK_AFTER if limit is None else limit
+    open_reqs = [r for r in session.requirements
+                 if r.get("status") == "active"
+                 and (r.get("report") or {}).get("verdict") in ("violated", "partial")]
+    if not open_reqs:
+        return []
+
+    # Edits are counted PER requirement, against the file each one is about. A
+    # requirement scoped to answer.md is not being failed by three edits to
+    # cleaned.csv — the agent has not got to it yet — and counting those was
+    # enough to pause a run three steps in, on a table it had just repaired
+    # correctly, over a file it had not started.
+    stuck = []
+    for req in open_reqs:
+        scope = req.get("scope") or {}
+        want = scope.get("name") if scope.get("kind") == "file" else None
+        edits, settled = 0, False
+        for ev in reversed(session.events):
+            if ev.get("type") != "step":
+                continue
+            if any(c.get("id") == req["id"] and c.get("verdict") == "satisfied"
+                   for c in ev.get("chips") or []):
+                settled = True
+                break
+            meta = ev.get("meta") or {}
+            if meta.get("kind") == "edit" and meta.get("ok"):
+                path = meta.get("path")
+                if want and path and _slug(path) != _slug(want):
+                    continue
+                edits += 1
+                if edits >= limit:
+                    break
+        if edits >= limit and not settled:
+            stuck.append(req["id"])
+    return sorted(stuck)
+
+
 def step(session):
     """Plan and take exactly one action. Returns the events it produced."""
     if session.status == "done":
@@ -535,6 +598,19 @@ def step(session):
             session.log("notice",
                         text="Loop paused: critical requirement broke — "
                              + ", ".join(c["id"] for c in regressions))
+            break
+
+        # Three edits and the same requirement is still red. Either the agent
+        # cannot settle it or the verdict is wrong, and both of those are for a
+        # person to look at — going round a fourth time only spends the budget.
+        stuck = _stuck(session)
+        if stuck:
+            session.status = "paused"
+            session.log("notice",
+                        text=(f"Loop paused: no progress on {', '.join(stuck)} "
+                              f"after {STUCK_AFTER} edits. Either steer it, or "
+                              f"check whether the verdict is right."),
+                        stuck=stuck)
             break
 
     if session.status == "running":

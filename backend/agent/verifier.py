@@ -16,6 +16,7 @@ import re
 
 import checker  # v3 Tier-1 checks, reused as-is
 import code_checker  # Tier-1 for Python deliverables
+import table_checker  # Tier-1 for CSV deliverables, read against their source
 from . import llm
 from . import requirements as R
 
@@ -333,6 +334,84 @@ def _check_code_prop(req, doc, scope_range):
     return verdict, "; ".join(details), _artifact_evidence(doc, locs)
 
 
+_CSV_EXT = re.compile(r"\.csv$", re.I)
+
+
+def _pick_table(doc, req, scope_range):
+    """Which workspace file holds the table this requirement is about.
+
+    Named in params when the extractor knew the name, otherwise the only CSV in
+    the workspace. Two CSVs and no name is a question this cannot answer, and
+    saying so beats picking one.
+    """
+    named = str((req.get("params") or {}).get("table") or "").strip()
+    csvs = [f for f in doc["files"] if _CSV_EXT.search(f["file"])]
+    if named:
+        for f in csvs:
+            if _slug(f["file"]) == _slug(named):
+                return f, ""
+        return None, f"no file named {named} in the workspace"
+    if len(csvs) == 1:
+        return csvs[0], ""
+    if not csvs:
+        return None, "no CSV in the workspace yet"
+    return None, (f"{len(csvs)} CSVs in the workspace and the requirement "
+                  f"names none of them")
+
+
+def _check_table_prop(req, doc, scope_range, session):
+    """Dispatch to the CSV checker, with the attachment it must be read against.
+
+    The one check in this file that is handed source material. tools.Attachments
+    keeps attachments out of the checker on purpose — the workspace is the
+    deliverable — but "keep every row of the table you were given" is a claim
+    about both, and the judge cannot answer it: on 2026-09-04 it failed two
+    deliverables that were identical to the benchmark's gold table, ten chips
+    between them.
+    """
+    params = req.get("params") or {}
+    target, why = _pick_table(doc, req, scope_range)
+    if target is None:
+        return "unverified", why, []
+
+    reference, ref_why = "", ""
+    att = getattr(session, "attachments", None)
+    names = att.list() if att is not None else []
+    wanted = str(params.get("source") or "").strip()
+    pool = [n for n in names if _CSV_EXT.search(n)] or names
+    if wanted:
+        pool = [n for n in names if _slug(n) == _slug(wanted)] or pool
+    if len(pool) == 1:
+        reference = att.read(pool[0]) or ""
+    elif not pool:
+        ref_why = "no attachment to compare the table against"
+    else:
+        ref_why = f"{len(pool)} attachments and the requirement names none"
+
+    start, end = scope_range
+    stated = doc["text"][start:end]
+    table = doc["text"][target["start"]:target["end"]]
+    verdict, detail, bad_rows = table_checker.check(
+        params.get("prop"), params, table, reference, stated)
+    if verdict == "unverified" and ref_why and not reference:
+        detail = ref_why
+
+    # Row indexes -> spans in the combined text, so the evidence lands on the
+    # offending line of the table rather than on the file.
+    locs, lines = [], table.split("\n")
+    offsets, at = [], 0
+    for ln in lines:
+        offsets.append(at)
+        at += len(ln) + 1
+    for i in bad_rows:
+        n = i + 1                      # data row 0 is line 1, after the header
+        if n < len(lines):
+            a = target["start"] + offsets[n]
+            locs.append({"start": a, "end": a + len(lines[n]),
+                         "text": lines[n][:120]})
+    return verdict, f"[{target['file']}] {detail}" if detail else "", locs[:6]
+
+
 def _check_code(req, doc, scope_range):
     """Dispatch to the v3 checker. Adds `partial`, which v3 has no need for:
     a multi-phrase preserve requirement can be three-quarters kept, and
@@ -645,7 +724,10 @@ def verify(session, judge_pass=False, **kw):
         scope_hash = _hash(doc["text"][rng[0]:rng[1]])
         confidence = None
 
-        if req.get("verify") == "code":
+        if req.get("verify") == "code" and req.get("type") == "table-prop":
+            verdict, detail, locs = _check_table_prop(req, doc, rng, session)
+            evidence = _artifact_evidence(doc, locs)
+        elif req.get("verify") == "code":
             verdict, detail, evidence = _check_code(req, doc, rng)
         elif req["id"] in judged:
             verdict, detail, quote, confidence = judged[req["id"]]
@@ -677,7 +759,11 @@ def verify(session, judge_pass=False, **kw):
         # user knows which file it counted.
         where = locate(doc, rng[0], rng[1])["file"]
         if where and verdict != "unverified" and detail \
-                and req.get("type") != "code-prop":   # names its own files
+                and req.get("type") not in ("code-prop", "table-prop"):
+            # Both of those name their own file, and for a table property the
+            # file it names is the CSV it measured — which is not always the
+            # file the requirement is scoped to. "[answer.md] [cleaned.csv] 13
+            # rows" would be two answers to the same question.
             detail = f"[{where}] {detail}"
 
         # A length verdict has no phrase to point at. Give it the scope itself

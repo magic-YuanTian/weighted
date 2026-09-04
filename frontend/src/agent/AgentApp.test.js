@@ -54,6 +54,21 @@ const RUNNING = {
   ],
 };
 
+/* The moment after extraction, which is where the run now stops: the list
+   exists and not one step has been taken. RUNNING already carries a step, so a
+   test about starting cannot use it — the button only offers itself when there
+   is nothing to continue. */
+const EXTRACTED = {
+  ...EMPTY,
+  brief: 'Write a package.', stepCount: 0,
+  requirements: REQS, counts: { violated: 1, unverified: 1 }, blocking: ['R1'],
+  questions: RUNNING.questions,
+  events: [
+    { i: 0, type: 'user', text: 'The cover letter must be 350-500 words. Then run the word-count check.' },
+    { i: 1, type: 'extracted', ids: ['R1', 'R2'], unmapped: 2 },
+  ],
+};
+
 const CONTEXT = {
   total: 900,
   parts: [{
@@ -100,22 +115,47 @@ async function startSession() {
   return composer;
 }
 
-test('typing the task starts the run: message, then steps', async () => {
-  await startSession();
-  await waitFor(() => {
-    const urls = global.fetch.mock.calls.map((c) => String(c[0]));
-    expect(urls.some((u) => u.includes('/message'))).toBe(true);
-    expect(urls.some((u) => u.includes('/step'))).toBe(true);
+test('the first message extracts and then waits to be started', async () => {
+  // /message answers with the list and no work done — the real shape of the
+  // moment extraction lands
+  global.fetch = jest.fn((url) => {
+    if (url.includes('/session')) return body(EMPTY);
+    if (url.includes('/message')) return body(EXTRACTED);
+    if (url.includes('/step')) return body({ events: [], snapshot: RUNNING, canContinue: false });
+    return body(EXTRACTED);
   });
+  await startSession();
+
   // requirements extracted from that first message show up in the rail
   expect(await screen.findByText('Cover letter is 350-500 words')).toBeInTheDocument();
-  expect(screen.getByText(/Starting on it/)).toBeInTheDocument();
+  expect(screen.getByText(/Here is what I read the task as asking for/)).toBeInTheDocument();
+
+  // and the run has NOT begun: the list is a thing to read before it is a
+  // thing to be measured against
+  expect(global.fetch.mock.calls.some((c) => String(c[0]).includes('/step'))).toBe(false);
+
+  fireEvent.click(screen.getByText('Start the agent'));
+  await waitFor(() => expect(global.fetch.mock.calls.some(
+    (c) => String(c[0]).includes('/step'))).toBe(true));
+});
+
+test('a later message runs straight through, without stopping again', async () => {
+  await startSession();
+  await screen.findByText('Cover letter is 350-500 words');
+  const composer = screen.getByPlaceholderText(/Describe the task/);
+  fireEvent.change(composer, { target: { value: 'Shorten the second paragraph.' } });
+  fireEvent.keyDown(composer, { key: 'Enter' });
+  // the pause is the first message's alone; an instruction to a working agent
+  // is not a place to put a button
+  await waitFor(() => expect(global.fetch.mock.calls.some(
+    (c) => String(c[0]).includes('/step'))).toBe(true));
 });
 
 test('a clarification question is asked in the chat and never blocks the run', async () => {
   await startSession();
   expect(await screen.findByText('Hard limit or guideline?')).toBeInTheDocument();
-  expect(global.fetch.mock.calls.some((c) => String(c[0]).includes('/step'))).toBe(true);
+  // it is a card in the stream, not a modal: the rail is readable behind it
+  expect(screen.getByText('Cover letter is 350-500 words')).toBeInTheDocument();
 
   fireEvent.click(screen.getByText('hard limit'));
   await waitFor(() => expect(global.fetch.mock.calls.some(
@@ -309,8 +349,9 @@ test('a sent message shows up instantly, before the server answers', async () =>
   expect(screen.getByText(/reading the task/)).toBeInTheDocument();
 
   release();
-  await waitFor(() => expect(global.fetch.mock.calls.some(
-    (c) => String(c[0]).includes('/step'))).toBe(true));
+  // and once it lands the screen stops saying so and shows what it got
+  expect(await screen.findByText('Cover letter is 350-500 words')).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText(/reading the task/)).toBeNull());
 });
 
 test('the footer shows every step, and a column jumps back to it', async () => {

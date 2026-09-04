@@ -278,8 +278,10 @@ def commit():
 def message():
     """A turn of the conversation. The first one is also the task brief: it
     seeds the requirement store, in the same request, so the user never meets a
-    setup screen. Extraction stays visible (the requirements appear, editable,
-    in the rail) but it no longer blocks the work."""
+    setup screen. Extraction stays visible — the requirements appear, editable,
+    in the rail — and this route never blocks: it returns the moment the list
+    exists. Whether to start working is the client's call, and it holds the
+    first turn there so the list is read before it is measured against."""
     try:
         s, data = _session()
         text = (data.get("text") or "").strip()

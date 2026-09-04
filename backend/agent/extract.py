@@ -79,8 +79,28 @@ Extract the requirements. Rules:
                        forbids       {{"construct": one of the same}}
                        forbids_names {{"names":["deque","handle_message"]}}
                        single_return {{}}      (one return per value-returning function)
+                       max_functions {{"max": 1}}
+                                     (a cap on HOW MANY functions the file
+                                      defines. "no more than one function" is
+                                      this one, never max_function_lines —
+                                      that caps how LONG a body is, and the two
+                                      read alike and check nothing alike.)
                        max_function_lines {{"max": 8}}
+                                     (a cap on the lines in one function's
+                                      body, and only ever from a brief that
+                                      talks about a function's length.)
+                       max_total_lines {{"max": 15}}
+                                     (a cap on the WHOLE FILE's line count —
+                                      "the answer in total must not exceed 15
+                                      lines". Three caps read alike and check
+                                      nothing alike: this one counts the file's
+                                      lines, max_function_lines counts one
+                                      body's, max_line_length counts a line's
+                                      characters. Take the one the brief's own
+                                      unit names.)
                        max_line_length    {{"max": 80}}
+                                     (characters in a line, only ever from a
+                                      brief that says characters or width.)
                        no_blank_lines_in_body {{}}
                        docstrings    {{"kind":"function"|"class"|"both"}}
                                      (presence and one-line-ness ONLY. "the
@@ -90,6 +110,38 @@ Extract the requirements. Rules:
                      A code constraint none of these fits is `content`,
                      never a code-prop with no prop: a property the
                      checker does not have cannot be checked at all.
+                     Never substitute a near-miss for a property or a
+                     construct the list lacks. A brief that bans `switch`
+                     bans `switch` — write that word, and let the checker
+                     report it unverified; rewriting it as a ban on `if`
+                     fails correct code over a rule nobody stated. The same
+                     goes for a property: "returns a str" is not `uses`
+                     return, and "takes no arguments" is not `defines`.
+                     Those are `content`.
+    table-prop       params {{"prop": "<one of the below>", ...}}  a property of
+                     a CSV deliverable, decided by comparing it with the table
+                     the brief attached. Every promise a wrangling brief makes
+                     ABOUT its source belongs here and not in `content`: these
+                     are settled by a differ, and reading a hundred rows to
+                     answer them is exactly what nobody can do reliably.
+                       rows          {{}}    ("keep every row")
+                       columns       {{}}    ("keep the header", "keep every
+                                             column")
+                       row_order     {{}}    ("keep the original row order")
+                       only_columns_change {{"columns":["event"]}}
+                                     ("leave every other column exactly as it
+                                      is", "change only the event column" —
+                                      list the columns the brief SAYS may
+                                      change, spelled as the brief spells them)
+                       column_case   {{"column":"event","case":"upper"|"lower"}}
+                       count_matches {{"column":"event","value":"DINNER"}}
+                                     (the deliverable has to REPORT how many
+                                      rows hold that value. Scope this one to
+                                      the file the answer goes in; the count
+                                      itself is taken from the table.)
+                     A rule about WHICH values become what — fold these five
+                     spellings onto DINNER, uppercase but keep the typo — is
+                     not one of these. That is `content`.
     content          a claim about what the text must say, or about what code
                      MEANS — does it compute the right thing, does a sentence
                      say what it should                     (judged)
@@ -141,12 +193,83 @@ def _locate(brief, quote):
 # The code-props that check for a literal identifier, and where they keep it.
 # The prompt asks for names the brief gave; this is what happens when the ask
 # is not honoured, which for a describe-don't-name brief is most of the time.
+# The table properties name columns, and a column the brief never mentions is
+# the extractor's invention exactly as an invented function name is.
+_TABLE_NAMED_PARAMS = {
+    "only_columns_change": ("columns",),
+    "column_case": ("column",),
+    "count_matches": ("column", "value"),
+}
+
 _NAMED_PARAMS = {
     "defines": ("name",),
     "assigned_once": ("name",),
     "module_level": ("name",),
     "initializes": ("name", "call"),
 }
+
+
+# The words a brief uses for each construct `uses`/`forbids` can name. A
+# construct is a legal parameter whatever the brief said, so nothing downstream
+# can tell that "do not use switch statements" was checked as a ban on `if` —
+# the checker answers the question it was handed, confidently, and fails
+# correct code over a rule nobody wrote. Grounding is the only place this is
+# catchable: if the brief never says the word, the requirement is not about
+# that construct.
+_CONSTRUCT_WORDS = {
+    "for": ("for",), "while": ("while",), "if": ("if",), "return": ("return",),
+    "list": ("list",), "listcomp": ("comprehension",),
+    "comprehension": ("comprehension",), "not": ("not",), "class": ("class",),
+    "lambda": ("lambda",), "try": ("try", "except"), "with": ("with",),
+    "yield": ("yield",), "global": ("global",),
+    "raise": ("rais", "throw", "error", "exception"),
+}
+
+# A naming rule is about how something is SPELLED. A requirement that never
+# mentions a convention is not one — "make it take no arguments" came back as
+# naming/function/snake_case, which passes on a function that is already
+# snake_case while the thing actually asked for goes unchecked. A green chip
+# nobody verified is worse than a red one that is wrong.
+_NAMING_WORDS = ("snake_case", "snake case", "camelcase", "camel case",
+                 "pascalcase", "pascal case", "upper_snake", "uppercase",
+                 "naming", "convention", "spelled", "named in", "case")
+
+
+def _says(text, words):
+    """Does the text use one of these words — allowing the endings English puts
+    on them? "comprehensions" and "raising" are the brief naming a
+    comprehension and a raise; a matcher that demands the bare stem calls both
+    ungrounded and demotes a correct requirement to the judge. Words of three
+    letters or fewer keep both boundaries, because `for` inside `format` and
+    `if` inside `iframe` are not the brief naming anything."""
+    for w in words:
+        edge = r"\b" if len(w) > 3 else r"\b"
+        tail = "" if len(w) > 3 else r"\b"
+        if re.search(edge + re.escape(w) + tail, text):
+            return True
+    return False
+
+
+# The properties that answer "this is PRESENT". A brief sentence that NEGATES
+# one of them has nothing here to answer it — there is no negated module_level
+# and no negated assigned_once — and the checker, asked the positive question,
+# reports correct code as violating it. A chip no edit can settle.
+#
+# Measured on 2026-09-04 over sixteen CodeIF instances: four of the eleven run
+# against the agent carried one ("variable x should not be a global variable",
+# "should not be a constant", "should not use the bisect module"), and in each
+# the chip stayed red on code that obeyed the brief. One run spent sixteen
+# steps chasing it.
+#
+# The caps are deliberately NOT in this set. "No more than three functions" is
+# negated language and max_functions is exactly the right property for it, as
+# forbids and forbids_names are for a banned construct or name. Only the
+# presence claims are here, and only because the schema has no opposite for
+# them.
+_PRESENCE_PROPS = ("imports", "module_level", "assigned_once", "defines",
+                   "initializes", "uses", "single_return", "docstrings")
+_NEGATION = re.compile(r"\b(?:not|never|no|without|avoid|cannot|nor)\b"
+                       r"|\bn't\b|\bout of\b", re.I)
 
 
 def _grounded(brief, raw):
@@ -160,10 +283,54 @@ def _grounded(brief, raw):
     still real; it is just a claim about the code's meaning, which a judge can
     answer and a parser cannot.
     """
-    if (raw.get("type") or "") != "code-prop":
+    rtype = raw.get("type") or ""
+    if rtype == "table-prop":
+        params = raw.get("params") or {}
+        keys = _TABLE_NAMED_PARAMS.get(
+            str(params.get("prop") or "").strip().lower())
+        if not keys:
+            return True
+        haystack = brief.lower()
+        for key in keys:
+            value = params.get(key)
+            values = value if isinstance(value, (list, tuple)) else [value]
+            for v in values:
+                v = str(v or "").strip().lower()
+                if v and v not in haystack:
+                    return False
+        return True
+    if rtype != "code-prop":
         return True
     params = raw.get("params") or {}
-    keys = _NAMED_PARAMS.get(str(params.get("prop") or "").strip().lower())
+    prop = str(params.get("prop") or "").strip().lower()
+    # The requirement's own sentence, not the whole brief: a construct named
+    # somewhere else in a long task says nothing about THIS rule.
+    said = f"{raw.get('text') or ''} {raw.get('quote') or ''}".lower()
+
+    # A ban the schema cannot state. Judged, not parsed: the requirement is
+    # real, it is only this property that cannot answer it.
+    if prop in _PRESENCE_PROPS and _NEGATION.search(said):
+        return False
+
+    # "Define an interface named X" names no Python construct. The agent may
+    # answer it with a class, a Protocol or a function, and `defines` has to be
+    # told which before it can look — asked for a function, it reports a class
+    # of that exact name as missing, which is what CodeIF 1087's first draft
+    # was failed for.
+    if prop == "defines" and _says(said, ("interface",)):
+        return False
+
+    if prop in ("uses", "forbids"):
+        construct = str(params.get("construct") or "").strip().lower()
+        words = _CONSTRUCT_WORDS.get(construct)
+        # An unknown construct is the checker's problem, not grounding's — it
+        # already answers `unverified` and says so.
+        return not words or _says(said, words)
+
+    if prop == "naming":
+        return _says(said, _NAMING_WORDS)
+
+    keys = _NAMED_PARAMS.get(prop)
     if not keys:
         return True
     haystack = brief.lower()

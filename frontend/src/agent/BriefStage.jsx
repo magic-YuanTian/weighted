@@ -18,8 +18,6 @@ export default function BriefStage({ busy, onExtract }) {
     return () => { live = false; };
   }, []);
 
-  const current = tasks.find((t) => t.id === picked);
-
   function choose(id) {
     setPicked(id);
     const t = tasks.find((x) => x.id === id);
@@ -47,13 +45,6 @@ export default function BriefStage({ busy, onExtract }) {
                 </option>
               ))}
             </select>
-            {current && (
-              <p className="taskmeta">
-                <span>{current.source}</span>
-                <span>{current.words.toLocaleString()} words</span>
-                <em>{current.note}</em>
-              </p>
-            )}
           </div>
         )}
 

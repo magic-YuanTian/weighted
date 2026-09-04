@@ -16,7 +16,8 @@ mechanism elsewhere:
 import copy
 import re
 
-import code_checker  # what the AST checker can and cannot answer
+import code_checker
+import table_checker  # what the AST checker can and cannot answer
 
 # type -> (kind, default verification mode)
 TYPE_ROUTING = {
@@ -26,6 +27,7 @@ TYPE_ROUTING = {
     "preserve":        ("artifact", "code"),
     "structure":       ("artifact", "code"),
     "code-prop":       ("artifact", "code"),
+    "table-prop":      ("artifact", "code"),
     "content":         ("artifact", "judge"),
     "tone":            ("artifact", "judge"),
     "custom":          ("artifact", "judge"),
@@ -77,6 +79,13 @@ def normalize(raw, index=0):
     # never checked, which is the one outcome this app exists to prevent.
     if rtype == "code-prop" and verify == "code" \
             and not code_checker.usable(params.get("prop"), params):
+        verify = "judge"
+    # Same rule for the table properties, and the same reason. These are the
+    # relational promises a wrangling brief makes — keep every row, leave the
+    # other columns alone — which nothing could parse until table_checker
+    # existed and which the judge answered wrongly ten times out of ten.
+    if rtype == "table-prop" and verify == "code" \
+            and not table_checker.usable(params.get("prop"), params):
         verify = "judge"
 
     return {

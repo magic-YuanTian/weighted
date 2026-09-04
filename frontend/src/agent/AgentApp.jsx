@@ -291,16 +291,31 @@ export default function AgentApp() {
 
   /* The first message costs a model call (it is also the requirement
      extraction), so the screen must answer the keystroke, not the round trip:
-     the message appears immediately and the run says what it is doing. */
+     the message appears immediately and the run says what it is doing.
+
+     That first message is also the one turn the run does NOT continue through
+     on its own. Extraction is the moment the task becomes a list someone is
+     about to be held to, and it used to scroll past under the agent's first
+     step — read, if at all, against work already done. So the run stops there
+     and waits to be started. Only there: every later message is an instruction
+     to an agent already working, and pausing on those would just be a button
+     between the user and the thing they asked for.
+
+     The pause is keyed on requirements actually arriving, so the control
+     condition — which extracts nothing — is untouched and still runs straight
+     through. */
   const send = useCallback(async (text) => {
     if (!text.trim()) return true;
+    const first = !(((snapRef.current && snapRef.current.events) || [])
+      .some((e) => e.type === 'user'));
     setOutbox(text.trim());
     setBusy('reading the task');
     try {
-      setSnap(await api.message(sessionId, text.trim()));
+      const s = await api.message(sessionId, text.trim());
+      setSnap(s);
       setOutbox(null);
       setBusy('');
-      await doRun();
+      if (!(first && ((s.requirements || []).length))) await doRun();
       return true;
     } catch (e) {
       // A dropped response does not mean a dropped message: if the backend
@@ -316,7 +331,7 @@ export default function AgentApp() {
             setSnap(s);
             setOutbox(null);
             setBusy('');
-            await doRun();
+            if (!(first && ((s.requirements || []).length))) await doRun();
             return true;
           }
         } catch (e2) { /* backend truly unreachable — fall through */ }
