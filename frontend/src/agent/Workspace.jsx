@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { isDelimited, parseDelimited, sepFor, shapeTable, writeField } from './delimited';
+import { useScrollTelemetry } from './telemetry';
 
 const words = (t) => (t || '').split(/\s+/).filter(Boolean).length;
 
@@ -82,7 +83,8 @@ function buildHtml(text, decorations, hitKey) {
    changes, so freezing the value is what keeps the caret and the in-progress
    keystrokes safe. The fresh decorations land on the first render after the
    server has echoed the user's text back. */
-const FileText = React.memo(function FileText({ path, text, decorations, hitKey, onPick, onSave }) {
+const FileText = React.memo(function FileText({ path, text, decorations, hitKey, onPick, onSave,
+                                                readOnly }) {
   const ref = useRef(null);
   const dirty = useRef(false);
   const timer = useRef(null);
@@ -97,7 +99,7 @@ const FileText = React.memo(function FileText({ path, text, decorations, hitKey,
 
   const flush = () => {
     clearTimeout(timer.current);
-    if (!dirty.current || !ref.current) return;
+    if (!dirty.current || !ref.current || readOnly) return;
     dirty.current = false;
     const now = ref.current.textContent || '';
     pending.current = now;
@@ -107,7 +109,10 @@ const FileText = React.memo(function FileText({ path, text, decorations, hitKey,
   return (
     <div
       className={`filetext ${isCode(path) ? 'code' : ''}`}
-      contentEditable
+      /* The chat baseline reads the workspace and does not write to it, and a
+         handed-in task is read-only for everyone; the surface is otherwise
+         the same, so a passage can still be selected and pointed at. */
+      contentEditable={!readOnly}
       suppressContentEditableWarning
       spellCheck={false}
       ref={ref}
@@ -115,6 +120,7 @@ const FileText = React.memo(function FileText({ path, text, decorations, hitKey,
       dangerouslySetInnerHTML={{ __html: html }}
       onFocus={() => setFocused(true)}
       onInput={() => {
+        if (readOnly) return;
         dirty.current = true;
         clearTimeout(timer.current);
         timer.current = setTimeout(flush, 1200);        // save while you pause
@@ -145,7 +151,7 @@ function markFor(decorations, cell) {
   return null;
 }
 
-function Cell({ tag: Tag, cell, numeric, mark, hitKey, onPick, onFocus, onCommit }) {
+function Cell({ tag: Tag, cell, numeric, mark, hitKey, onPick, onFocus, onCommit, readOnly }) {
   const key = mark ? `${mark.reqId}:${mark.start}` : null;
   const cls = [
     numeric ? 'num' : '',
@@ -160,11 +166,11 @@ function Cell({ tag: Tag, cell, numeric, mark, hitKey, onPick, onFocus, onCommit
       data-mark={key || undefined}
       data-req={mark ? mark.reqId : undefined}
       title={mark ? `${mark.reqId} · ${mark.verdict}` : undefined}
-      contentEditable={!!cell}
+      contentEditable={!!cell && !readOnly}
       suppressContentEditableWarning
       spellCheck={false}
       onFocus={onFocus}
-      onBlur={(e) => onCommit(cell, e.currentTarget.textContent || '')}
+      onBlur={(e) => { if (!readOnly) onCommit(cell, e.currentTarget.textContent || ''); }}
       /* Enter commits the cell rather than opening a second line inside it —
          a field that spans two lines is a quoted newline, not a keystroke.
          Escape puts the cell back the way the file has it. */
@@ -194,7 +200,8 @@ function Cell({ tag: Tag, cell, numeric, mark, hitKey, onPick, onFocus, onCommit
    of the next cell correct when two cells are edited before the save lands.
    A server update while a cell has focus is held back instead, because that
    is the one repaint that would eat keystrokes mid-word. */
-const CsvTable = React.memo(function CsvTable({ path, text, decorations, hitKey, onPick, onSave }) {
+const CsvTable = React.memo(function CsvTable({ path, text, decorations, hitKey, onPick, onSave,
+                                                readOnly }) {
   const [focused, setFocused] = useState(false);
   const [draft, setDraft] = useState(null);
   const [shown, setShown] = useState(CSV_PAGE);
@@ -235,7 +242,7 @@ const CsvTable = React.memo(function CsvTable({ path, text, decorations, hitKey,
                 <Cell
                   key={j} tag="th" cell={c} numeric={table.numeric[j]}
                   mark={markFor(decorations, c)} hitKey={hitKey}
-                  onPick={onPick} onFocus={focus} onCommit={commit}
+                  onPick={onPick} onFocus={focus} onCommit={commit} readOnly={readOnly}
                 />
               ))}
             </tr>
@@ -248,7 +255,7 @@ const CsvTable = React.memo(function CsvTable({ path, text, decorations, hitKey,
                   <Cell
                     key={j} tag="td" cell={c} numeric={table.numeric[j]}
                     mark={markFor(decorations, c)} hitKey={hitKey}
-                    onPick={onPick} onFocus={focus} onCommit={commit}
+                    onPick={onPick} onFocus={focus} onCommit={commit} readOnly={readOnly}
                   />
                 ))}
               </tr>
@@ -272,6 +279,10 @@ const CsvTable = React.memo(function CsvTable({ path, text, decorations, hitKey,
 export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze, onAnchor, onSave }) {
   // memoised for the shape pass below: a fresh [] each render re-parses every file
   const files = useMemo(() => (snap && snap.files) || [], [snap]);
+  // No onSave means nobody may type here: the chat baseline, or a task that
+  // has been handed in. Reading and selecting work exactly as before.
+  const readOnly = !onSave;
+  const onScroll = useScrollTelemetry(snap && snap.sessionId, 'workspace');
   const { byFile, scopes } = useDecorations(snap && snap.requirements, selected);
   const [hitKey, setHitKey] = useState(null);
   const [sel, setSel] = useState(null);       // {text, file, x, y}
@@ -336,6 +347,7 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
   const act = (kind) => {
     if (!sel) return;
     if (kind === 'freeze') {
+      if (!onFreeze) return;
       onFreeze(sel.text, sel.file);
       setSel(null);
       window.getSelection().removeAllRanges();
@@ -347,7 +359,7 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
   };
 
   const submitAnchor = () => {
-    if (!anchor || !instruction.trim()) return;
+    if (!anchor || !instruction.trim() || !onAnchor) return;
     onAnchor(anchor.kind, anchor.text, anchor.file, instruction.trim());
     setAnchor(null);
     setInstruction('');
@@ -380,23 +392,33 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
         className="scroll"
         ref={scrollRef}
         style={{ position: 'relative' }}
+        onScroll={onScroll}
         onMouseUp={readSelection}
         onKeyUp={(e) => { if (e.shiftKey || e.key === 'Shift') readSelection(); }}
       >
-        {sel && onFreeze && onAnchor && (
+        {/* Each button is a mechanism the condition either has or has not:
+            freeze is the weighted condition's, the anchored edits are shared
+            with in-situ, and the chat baseline draws no toolbar at all. */}
+        {sel && (onFreeze || onAnchor) && (
           <div className="seltools"
                style={{ left: sel.x, top: sel.y }}
                onMouseDown={(e) => e.preventDefault()} /* keep focus & selection */>
-            <button onClick={() => act('freeze')}
-                    title="Lock this text: the edit tool refuses any write that removes it">
-              ❄ Freeze
-            </button>
-            <button onClick={() => act('replace')} title="Ask the agent to replace exactly this passage">
-              Replace…
-            </button>
-            <button onClick={() => act('insert')} title="Ask the agent to add something right after this">
-              Insert after…
-            </button>
+            {onFreeze && (
+              <button onClick={() => act('freeze')}
+                      title="Lock this text: the edit tool refuses any write that removes it">
+                ❄ Freeze
+              </button>
+            )}
+            {onAnchor && (
+              <button onClick={() => act('replace')} title="Ask the agent to replace exactly this passage">
+                Replace…
+              </button>
+            )}
+            {onAnchor && (
+              <button onClick={() => act('insert')} title="Ask the agent to add something right after this">
+                Insert after…
+              </button>
+            )}
           </div>
         )}
         {files.length === 0 ? (
@@ -445,6 +467,7 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
                       hitKey={hitKey}
                       onPick={onSelectReq}
                       onSave={onSave}
+                      readOnly={readOnly}
                     />
                   ) : (
                     <FileText
@@ -454,6 +477,7 @@ export default function Workspace({ snap, selected, focus, onSelectReq, onFreeze
                       hitKey={hitKey}
                       onPick={onSelectReq}
                       onSave={onSave}
+                      readOnly={readOnly}
                     />
                   )}
                 </div>

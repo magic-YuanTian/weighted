@@ -15,201 +15,234 @@ Sources
     LongWeave       hf.co/datasets/zikaixiao1/LongWeave  (MIT)
     AutoDCWorkflow  github.com/LanLi2017/LLM4DC          (no licence file)
 
-Why these six (2026-09-04). Three domains, two instances each, and two rules
-the set has to obey. Both are measured, not argued:
+Why these six (2026-09-05, sixth screen). Three domains, two instances each,
+every list under twenty requirements.
 
-  requirements  under twenty, always. The rail holds one chip per requirement,
-                and a list nobody can read is a screen nobody uses. Each count
-                below is the median of three runs of the real extractor over
-                the brief this script writes.
-  wrong first   the agent must not get the task right on its own. Measured by
-                running the real agent over the brief with nobody steering it
-                until it stops, and then checking the DELIVERABLE against
-                ground truth — not against the app's own verdicts, which is
-                the whole point. The programs are executed against known
-                answers, the tables compared with the benchmark's gold table
-                cell by cell, the biographies counted and read. If what the
-                agent leaves behind is correct, the task is finished and there
-                is nothing for a participant to steer, whatever the chips say.
+The study opens the WEIGHTED condition on a recorded pre-run: an unattended
+weighted agent ran the task once, stopped where the UI's auto-runner would
+have stopped — its finish, a pause, a reply to the user — or at ten steps,
+and that run is played back through the ordinary flow (agent/replay.py): the
+participant sends the brief, the recorded extraction comes back as the list,
+"start the agent" hands out the recorded steps one at a time with their files
+and chips, and where the recording stopped the live agent takes over with the
+same transcript. Recordings sit in tasks/traces/<task id>/ and are matched by
+the brief's text. The two control conditions start live. The two CODE tasks
+(restored on 2026-09-05 at the user's word — the earlier pair, 358 and 1087,
+in place of 808 and 891) are recorded differently: the pre-run is a PREFIX of
+a weighted run, cut before the agent's finish at an unfinished point — the
+first five steps of one run, the first three of the other — with at least one
+requirement red at the cut (the user: a prefix with every chip green is not
+acceptable either) and the deliverable wrong; where the prefix ends the
+auto-runner stops without a word in the chat (a dev-only trace marks the
+seam), so the participant inherits a disputed draft the agent had not
+declared done and starts the live agent themselves. The other four keep the
+sixth screen's rule below. Three rules:
 
-                This is the third anchor this file has used and the first one
-                that cannot be fooled. Measuring at the first draft credited
-                every task with headroom, because a first draft is a draft.
-                Measuring at the stop credited whatever the judge happened to
-                say, and the judge held four correct deliverables red and
-                passed two wrong ones.
+  incomplete    the recorded pre-run must stop with at least one requirement
+                red and the deliverable wrong by ground truth — a finish with
+                every chip green is not used, however wrong the answer — and
+                the task must not be one the weighted agent completes inside
+                ten steps as a rule. "Complete" is decided against ground
+                truth: the file on disk is executed against an oracle, diffed
+                against the gold table, or counted against the word budget
+                and the facts file, and every chip on the rail is green.
+  under twenty  the requirement count, over every extraction seen.
+  from scratch  the plain agent (the controls' prompt and tools) still gets
+                the task wrong often when it runs from the first message,
+                measured over ten unattended steps — or the controls would
+                have nothing to catch.
 
-What the unattended runs actually produced, and how each was caught:
+Nine weighted runs per task (six stopped by the auto-continue harness at ten
+steps, three in recording mode, stopped at the first halt) and six plain runs,
+on the repaired checker (screen_fixed.py / tally_fixed.py / perstep.py in the
+session scratchpad; see the memory note). Completions at the first halt:
 
-  1  CodeIF 358         14 reqs. Wrong twice. One run returned 3 for
-                        [-5, 1, 0] with k = 4, where the longest subarray
-                        whose sum is not divisible by 4 is [1, 0] and the
-                        answer is 2 — one term out in the arithmetic that
-                        drops the prefix. The other run left a file that does
-                        not parse: an insert dropped a line into the middle of
-                        a match block. Both caught by running it.
-  2  CodeIF 1087        16 reqs. Wrong twice. num_tilings returns 12, 28 and
-                        65 for N = 4, 5, 6, where the answers are 11, 24 and
-                        53; an earlier run returned 1, 5, 21, 89, which is a
-                        different sequence again. Caught by running it against
-                        the known counts.
-  3  menu p26           11 reqs. Wrong in two runs of three, and wrong in
-                        exactly the same nine cells both times. The date
-                        column is written four ways — year first with hyphens
-                        or dots, month first with hyphens or slashes — and has
-                        to come out as YYYY-MM-DDT00:00:00Z. In nine of the
-                        hundred rows the day sits where the month usually
-                        does, so 1949-23-12 is December the twenty-third; the
-                        agent parses by position and leaves all nine as they
-                        are. That the failures repeat cell for cell is what
-                        distinguishes this from menu p13, which it replaced:
-                        p13 was repaired correctly in two of five runs and its
-                        three failures had nothing in common — a stray column
-                        once, a missing answer.md twice. A task with a random
-                        outcome is not a hard task.
-  4  menu p18           17 reqs. Wrong. Row 24's sponsor is the placeholder
-                        [Restaurant ;name ;and/or ;location ;not ;given],
-                        which the brief empties; the agent uppercased it
-                        instead. One cell in 2,000. Caught by the gold table
-                        only — no property covers a value-level fold, so the
-                        run's own verdicts missed it.
-  5  KG_TO_TEXT #1       7 reqs. Wrong twice, 2,372 and 2,393 words against a
-                        2,000-2,100 budget. 119 triples in the same budget as
-                        the 81 the old task 5 carried, which is why it
-                        overruns. Counted, not judged.
-  6  KG_TO_TEXT #6       6 reqs. Wrong in three runs of three, and the word
-                        count alone catches two of them: 1,881 and 3,661
-                        against a 2,000-2,100 budget, the second nearly double
-                        the ceiling at 47 paragraphs. The third landed in
-                        budget at 2,013 words and failed differently — 31
-                        short paragraphs that restate each other, one naming
-                        The Single Device's authored and publication years and
-                        the next naming them again.
+  1  CodeIF 358         restored 2026-09-05. Eighteen weighted recordings
+                        (first halt or ten steps): finishes at steps 3-10 in
+                        fifteen, pauses at 3-4 in three; MaxSubarrayLength
+                        right at the first halt in 6 of 18, wrong in 12 —
+                        mostly 16-17 of the oracle's 60 cases, twice all 60,
+                        once a file that does not parse; the first miss is
+                        almost always ([-5, 1, 0], k=4): 3, 1 or -1 for 2.
+                        11-15 requirements, median 12. Recorded: the first 5
+                        steps of a 10-step run (write, two edits, a rewrite,
+                        an edit aimed at the judged correctness chip), cut
+                        mid-run — that chip still red, 16 of 60 cases wrong.
+  2  CodeIF 1087        restored 2026-09-05. Six weighted recordings: finishes
+                        at steps 4-6 in three, pauses at step 3 in three;
+                        num_tilings right at the halt in 1 of 6 — 8 to 10 of
+                        the oracle's 10 cases wrong otherwise (the base case
+                        or the recurrence; 12, 28, 65 for 11, 24, 53 in an
+                        earlier screen). 12-17 requirements, median 15.
+                        Recorded: the first 3 steps of a 6-step run (write,
+                        an edit aimed at the judged correctness chip, a
+                        read), cut before the edit that fixed it — the
+                        judged "returns the number of tilings" chip red on a
+                        recurrence that mis-states the gap transition, every
+                        case wrong.
+  3  menu p25           weighted 2 of 9; the other seven wrong in the
+                        sponsor placeholders — [?] and the double-bracketed
+                        'not given' notes, emptied where every other
+                        bracketed value is unbracketed and uppercased — or
+                        without an answer. Plain identical to gold 3 of 6.
+                        11-18 requirements, median 14. Recorded: 4 steps,
+                        paused with four chips red — currency folds and
+                        trims not done, a lone ? left where [?] should be
+                        emptied — and no answer yet.
+  4  menu p14           weighted 3 of 9; the other six wrong in the same two
+                        sponsor cells (rows 24 and 30, the placeholder
+                        uppercased with NAME kept where the brief's example
+                        drops it). Plain 0 of 6, the same two cells every
+                        time. 10-13 requirements. Recorded: 10 steps, paused,
+                        one sponsor cell left in mixed case with the
+                        uppercase chip red, plus a judged chip.
+  5  KG_TO_TEXT #8      weighted 0 of 9, plain 0 of 6: paused by the attempt
+                        rule at steps 5-7 on the judged faithfulness chip,
+                        6-16 of the 99 fact objects absent every time, the
+                        word budget broken in about a third. 5-8
+                        requirements. Recorded: 6 steps, paused, 2,120
+                        words with the budget chip red, 16 objects absent.
+  6  KG_TO_TEXT #11     weighted 0 of 9, plain 0 of 6: paused at steps 4-6,
+                        2-5 of 81 objects absent. 6-8 requirements.
+                        Recorded: 4 steps, paused, 2,182 words with the
+                        budget chip red.
 
-What this set gained over the one it replaces. The old pair 1-2 was LongWeave
-CODE_FIXING/4k, and it was dropped for being unreadable: a 352-line broken
-file is not something a participant can hold in their head, and the tiers do
-not help — CODE_FIXING/1k is a median of 223 lines and its shortest instance
-is 169, because LongWeave's tiers size the OUTPUT, not the input. CodeIF puts
-the difficulty in a list of constraints instead of in a wall of code, and its
-artifact is thirty lines.
+Restored after the sixth screen (2026-09-05). The user judged CodeIF 808 and
+891 contrived and asked for the earlier code pair back — 358 and 1087, the
+third screen's picks — with the pre-run cut at an unfinished point rather
+than caught on a red-chip halt; the two rows above are those recordings.
+Before that, a survey of natural-requirement code benchmarks (BigCodeBench-
+Hard, ClassEval, NaturalCodeBench, CIFE, IFEvalCode; 68 weighted recordings)
+found that fair single-function briefs are finished at step 3 with every chip
+green, and the only red-chip halts were checker misfires; see README.
 
-It also closes the gap the previous revision of this file called the highest-
-value change left. Every task in the old set scored 0% on code% — the share of
-requirements a parser decides rather than the judge. These two do not: 12 of
-652's 18 requirements and 9 of 1087's 16 are code properties the checker
-answers by parsing the file, 67% and 53%. Tasks 3-6 are still 0% and 17%.
+What the sixth screen dropped. CodeIF 137 (the nurses): 0 of 3 weighted in
+the first round, then right at its finish in 3 of 3 recording runs — 3 of 9
+at the first halt, 4 of 9 pushed through — and the recorded trace would have
+been a coin toss. menu p18: complete at weighted steps 4-6 in 3 of 3, and
+17-23 requirements. CodeIF 974 (the Fresnel integral) was tried and rejected:
+the plain agent gets it wrong 6 of 6, but the weighted agent writes the
+closed form at step 2 in 3 of 3, so a replayed pre-run would hand the
+participant the answer.
 
-What the screen ruled out, and it ruled out a lot. Sixteen CodeIF instances
-went through the extractor and fourteen were run against the real agent, with
-their output executed:
+What it ruled out. Code: 700 (5 of 9 weighted), 933 (2 of 9), 358 (2 of 6),
+1087 (2 of 3), 1059 (never complete, but on a CamelCase-variables rule
+beside a mandated lowercase parameter the checker does not exempt — a
+contradiction, which the doable rule forbids). Tables: p28 3/3, p13 2/3,
+p20 2/2, p24 1/3, p26 1/3, p27 1/3, p22 1/6 completed by the weighted agent;
+p17 and p21 held only by false chips over tables identical to gold (a judge
+saying placeholders remain when they are emptied; an extracted "change only
+the event column" beside a brief that trims two more); p12's misses turned
+on a brief naming a corrected value in its uppercased form when the source is
+mixed-case, which the checker's value_map — matched against the source —
+cannot see either. Beside the tasks: on p25 the extractor read "Deutsche
+Marks, Italian Lire and Drachmas stay exactly as they are" as a value_map
+folding the three onto the first, red over a table identical to gold, so the
+shipped brief says "every other currency value stays exactly as it is"; and
+the judge on 974 rejects a finite-interval quadrature as "not a calculation
+of the improper integral" — right when the number is -0.1399, pedantic when
+the closed form is returned beside it.
 
-  solved outright   630, 652, 682, 683, 687, 744, 851, 933, 1087's partner
-                    candidates 957 and 975 — every one produced code that
-                    passes an independent oracle. 652 was task 1 for a day: the
-                    prime-counting thread came back correct in three runs out
-                    of three, which is what took it out. A task the agent
-                    finishes is a task this study cannot use, however many
-                    constraints its brief carries.
-  891               Wrong, but barely: it returns -0.16952 for the minimum of
-                    GeLU where the answer is -0.16997, having guessed
-                    -sqrt(2/pi) for a stationary point that sits at -0.7518.
-                    A fourth-decimal slip is not something a participant can
-                    see, so 358's plainly wrong integer wins.
-  367/738, 745,     30, 28, 21, 33 and 25 requirements. Over the cap.
-  1034, 1075
-  menu p4, p9, p12  Four tables the agent repaired PERFECTLY — cell for cell
-  and p14           against gold, with the right answer to the purpose
-                    question. p9 is one mechanical rule over 82 cells, p4 is
-                    five folds over 10, p12 adds three replacements and two
-                    spelling corrections, p14 has 119 changed cells and a trap
-                    (it keeps the misspelling that p13 and p18 correct) — and
-                    all four were solved in three to six steps. Width of repair
-                    alone does not do it.
-  menu p13          Two of five unattended runs repaired it correctly. The
-                    three that failed failed differently — three stray cells
-                    in a frozen column once, a missing answer.md twice — which
-                    is a task with a random outcome rather than a hard one.
-  the small tables  Every AutoDCWorkflow instance at 20-50 rows — hospital
-                    p148, flights p117, ppp p74/p78/p79 — finished with
-                    nothing unmet in every logged run. Six instances, six
-                    zeros.
-  KG_TO_TEXT #0     Task 5 for a day. Its biography came in at 2,009 words with
-                    every claim traceable to the attachment; the only thing
-                    still red was the judge misreading a faithful rendering of
-                    a triple. 81 triples in a 2,000-word budget is not enough
-                    to strain.
-  AP_STYLE          46 and 74 requirements.
+Fourth screen (2026-09-04), kept as the history of the first two rules. Three
+rules, in the order they were applied, and the third gave way to the first
+two:
 
-One instruction genre used to be avoided here, and is no longer. A CodeIF
-brief that says "variable x should not be a global variable" or "should not be
-a constant" states a ban the checker has no property for — there is no negated
-module_level and no negated assigned_once — and the extractor used to answer it
-with the positive property, so the checker reported correct code as violating
-it. It appeared in four of the eleven candidates run against the agent (630,
-687, 808, 933) and burned sixteen steps in one of them.
+  doable        every requirement in the brief can be met by one Python file
+                or one CSV in this workspace, and none contradicts another.
+                CodeIF grafts instructions onto its questions and some cannot
+                be true here — a switch statement, a package, an interface
+                naming convention, a CamelCase rule beside a required name
+                like min_gelu — so codeif_instructions drops or restates
+                them under a generic policy, each edit recorded in the
+                manifest with its reason. One table brief (p26) described its
+                own data wrongly and was corrected, then dropped.
+  checked       every verdict a participant sees is one the checker can
+                defend. Where the judge was watched failing correct work —
+                trimming, folds, placeholders, uppercase, date formats, an
+                attachment's name read as a deliverable's, a dunder read as
+                a function name, a required name failed by a convention —
+                the check was made deterministic or the routing fixed. What
+                is left to the judge is what a judge is for: an answer file,
+                a biography's faithfulness, its tone.
+  first stop    the run's first halt should not be an accepted finish, and
+                should leave a requirement red. With the first two rules
+                enforced this holds for the biographies only. On a code or a
+                table brief the agent can meet, with a checker that tells it
+                the truth, it finishes — usually by step 5, usually right —
+                and the earlier screens' non-finishes turn out to have been
+                the contradictions and the false verdicts. The code and table
+                pairs below are therefore chosen on what the agent gets WRONG
+                at that finish, which is the second screen's rule, and the
+                README says so.
 
-That is fixed: extract._grounded now sends a negated presence-property to the
-judge instead of letting the parser answer the opposite question, and the same
-guard catches "define an interface named X", which has no Python construct to
-look for and was failing a class of that exact name. The caps are untouched —
-"no more than three functions" is negated language and max_functions is the
-right property for it. Two checker over-readings went with it: initializes now
-accepts a literal that spells the argument, and an argument LIST, so
-AnalyzeDwa("dwa", "info") is no longer "built from AnalyzeDwa, but not from
-dwa". The cost is real and is paid in code%: on the CodeIF pair those guards
-move two or three requirements per brief off the parser and onto the judge.
+The stuck pause counts attempts from the agent's own word: every file-changing
+tool in the weighted condition carries `targets`, the requirement ids the
+change is aimed at, and three changes aimed at one requirement that leave it
+violated pause the run, the count restarting when it turns satisfied and when
+the user presses continue.
 
-So the pool the next screen can draw from is wider than the one this set came
-out of.
+What the fourth screen's unattended runs produced (first-stop rule, cap 24,
+weighted only), three runs each on the repaired checker and the repaired
+briefs — 137 has since been replaced by 808 and p18 by p25, see above:
 
-What the audit found that the counts hid, and it is not about the tasks. Where
-a red chip could be settled against the benchmark's own answer, the judge was
-wrong about the tables far more often than it was right. Both wrangling runs
-ended with a cleaned.csv IDENTICAL to the gold table — every cell, every row,
-the original order — and both still showed red:
+  1  CodeIF 137         14 reqs (14, 14, 12). Finishes at steps 4, 3 and 3;
+                        solve() right twice and, once, never returns. Across
+                        the day's seven runs the answer was wrong in five
+                        (45, 0, None, 100, 37 and a hang, for 53); the judge's
+                        chip for "compute the minimum" was red over a wrong
+                        answer three times.
+  2  CodeIF 891         14 reqs (15, 13, 14). Finishes at step 3 three times;
+                        min_gelu right twice, and once raises on a numpy
+                        attribute that does not exist. Wrong in five of the
+                        day's six runs before the list was repaired.
+  3  menu p18           21 reqs (21, 21, 20). Finishes at steps 12 and 8 with
+                        the table identical to gold once and wrong in one
+                        cell once; paused once at step 10 on the judged
+                        answer chip. Wrong in seven of nine runs before the
+                        checker was repaired, in the placeholder cell.
+  4  menu p14           11 reqs (12, 10, 11). Finishes at steps 6, 12 and 6;
+                        identical to gold twice, wrong once in two sponsor
+                        cells — the placeholder emptied and uppercased the
+                        way p18 asks, where this brief keeps it.
+  5  KG_TO_TEXT #8      6 reqs. Paused three times of three (steps 6, 10, 8)
+                        on the judged faithfulness chip; 2,444 words once.
+  6  KG_TO_TEXT #11     7 reqs. Paused three of three (steps 5, 4, 4) on the
+                        same chip; 2,160 and 2,164 words against 2,000-2,100.
 
-  menu p13   stopped with 3 red on a perfect table and an answer.md naming all
-             31 sponsors the gold table says accept dollars. All three are
-             false, and one of them, "leave every other column exactly as it
-             is", is red on a file in which no other column was touched.
-  menu p4    stopped with 4 red on a perfect table, all four false — "only 99
-             data rows", "duplicated records", "duplicated blocks", none of
-             which the file contains. Meanwhile answer.md says 14 rows have
-             event DINNER where the table has 13, and the requirement that
-             asks for exactly that number is GREEN.
+What the repaired checker changed, instance by instance. Under the attempt
+rule with the OLD checker and briefs, 137, 891, 1194, 358, p18, p26 and p28
+all stopped short of finishing — and every one of those stops was a
+contradiction in the brief or a verdict that was wrong. With both repaired:
+1194 finishes 3 of 3 (right twice), 358 finishes 3 of 3 (right twice), p26
+finishes or is held only by false judge chips with a table identical to gold
+3 of 3, p27 (written for this screen: six dirty columns) the same 3 of 3,
+p28 the same. Six more CodeIF questions that state a worked example (316,
+999, 165, 646, 703, 743) were run with the new `returns` check: 316 and 646
+finish; 999, 165, 703 and 743 stop on further contradictions the generic
+policy does not cover — a variable that "should be a constant" and is the
+loop counter, "at most one class" beside two named classes — and on two
+extractor slips since guarded (a line-count cap read as a line-length cap, a
+parameter cap read as a function cap). 703's first draft failed the brief's
+own example — compress_string returned 8 for 6 — and the `returns` chip said
+so, which is the first time the app has been able to.
 
-The biographies show the milder form of the same thing: kg_6 ended holding a
-chip that says the text "states an unsupported event date" for September 21,
-1820, when the attachment gives that event a day of 21, a month of 9 and a
-year of 1820. The counted chip beside it — 1,928 words against a 2,000 floor —
-was right.
-
-So on the tables the verdicts are wrong in both directions at once: correct
-work held red, and the one wrong answer in the run let through. The mechanism
-is not truncation — verifier.py deliberately shows the judge the whole
-document and the whole attachment — it is that a 100-row, 20-column CSV read
-twice over at the study's pinned reasoning effort is not something this judge
-can hold. Requirements about a table are the ones to distrust; the counted
-ones (a word budget) and the parsed ones (a function cap) held up every time
-they were checked.
-
-The rest of the shape. Tasks 1-2 have three unattended runs each, task 3 two,
-tasks 4-6 one, so most of the first-attempt numbers are a single observation.
-Extraction is stochastic and moves them more than anything else does: 652
-extracted to 18, 19 and 18 requirements on three consecutive runs, and the run
-that produced 19 ended with twelve violated while the run that produced 18
-closed every one. Read the first-attempt column as "not zero, and for a reason
-that survives checking" rather than as a magnitude.
+The shape of the numbers. A CodeIF instance finishes in three to five steps
+and is right two times of three; the wrong third is a hang, a crash, or a
+wrong integer that no chip sees. A table instance finishes in six to twelve
+and is right two times of three, wrong in one or two cells. Extraction is
+stochastic and moves the requirement counts more than anything else does —
+p18 measured 15 to 21 across a day — so read a count as a band.
 
 Only the LongWeave file is large. It is streamed once and stopped as soon as
-both picked rows are in hand; with CODE_FIXING gone that is 30 MB of 224.
+both picked rows are in hand; KG_TO_TEXT/2k sits early, so that is about 30
+MB of 224. Every edit to a benchmark brief is in the manifest under `dropped`.
 """
 
 import csv
 import io
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -229,17 +262,10 @@ LONGWEAVE_URL = ("https://huggingface.co/datasets/zikaixiao1/LongWeave/"
 # CodeIF carries a question_id, so its pair is pinned by that. LongWeave has no
 # per-row id, so an instance is pinned by its ordinal within its (task, tier)
 # group, counted in file order.
-#
-# The KG pair used to be two 81-triple rows, matched to each other. It is now
-# 119 triples and 81, deliberately unmatched: the 81-triple row that used to be
-# task 5 wrote a biography that was correct — right length, claims all
-# traceable — and a task the agent finishes is a task the study cannot use.
-# 119 facts in the same 2,000-word budget is the difference. Its first
-# unattended run came in at 2,372 words.
 CODEIF_IDS = [358, 1087]
 KG_TASK = "longweave/KG_TO_TEXT/2k"
 LONGWEAVE_PICKS = [
-    (KG_TASK, [1, 6]),
+    (KG_TASK, [8, 11]),
 ]
 
 
@@ -279,34 +305,142 @@ def cut(prompt, marker, task):
 # the list. That is what makes the pair steerable at a readable size — the
 # artifact is thirty lines, not three hundred and fifty.
 #
-# Both instances are from the `hard` split, and both were picked by measuring,
-# not reading. Every candidate had the real extractor run over its brief three
-# times (the requirement count below is the median) and the real agent run over
-# it unattended; what the docstring quotes is what those runs did.
+# Both instances were picked by measuring, not reading: the real extractor run
+# over the brief three times, the real agent run over it unattended in the
+# weighted condition until its first halt, and the file on disk at that halt
+# executed against an oracle written from the question.
 #
-# One instruction genre is deliberately avoided in this pair: a ban on a
-# *variable property*. "Variable x should not be a global variable" and
-# "variable x should not be a constant" have no property in the checker's list
-# — there is no negated module_level, no negated assigned_once — and the
-# extractor answers them with the positive property instead, so the checker
-# reports the correct file as violating them. Four of the six candidates
-# screened before this pair carried one, and in each the chip stayed red on
-# code that obeyed the brief. Both instances here state their bans as
-# constructs (`for`, `if`, `list`, `global`) and as library names, which the
-# checker does have, and neither run produced an inverted verdict.
-# One restatement, recorded the way the KG builder records its own. CodeIF 652
-# ends its question with "Please write your code inside a markdown ```python```
-# wrapper" — a format instruction aimed at a chat answer. Here the deliverable
-# is a file, and the sentence arrives as a requirement: one screening run
-# extracted "provide the solution inside a markdown python fence" and then had
-# to grade it against solution.py. Dropped whole rather than rewritten, and the
-# manifest says so.
-CODEIF_DROP_SENTENCE = {
-    652: ("Please write your code inside a markdown ```python``` wrapper.",
-          "the deliverable is solution.py, so a markdown fence is a format the "
-          "file cannot be in — the sentence would be graded against a file it "
-          "does not describe"),
-}
+# One carries an instruction a single Python file cannot satisfy as written —
+# 358 asks for a switch statement (808 did too, and 891 for a function named
+# min_gelu under a CamelCase rule) —
+# and the policy below drops or restates those, each edit recorded in the
+# manifest. What is left is the benchmark's own text: the extractor's guard
+# (extract._grounded) routes a construct or a negated property the parser has
+# no answer for to the judge rather than letting the parser answer the
+# opposite question, which is what used to fail correct code on four of every
+# eleven CodeIF briefs.
+#
+# CODEIF_DROP_SENTENCE stays because it is the record of an edit policy: CodeIF
+# 652 used to end with "Please write your code inside a markdown ```python```
+# wrapper", a format instruction aimed at a chat answer, and here the
+# deliverable is a file. 358 and 1087 carry no such sentence, and no repeated
+# instruction; both were checked before pinning (as were 808 and 891).
+CODEIF_DROP_SENTENCE = {}
+
+# Instruction-level edits, under the same policy as the tables: an instruction
+# may be DELETED with its reason recorded, or RESTATED, never added. What gets
+# edited is what a single Python file in this workspace cannot satisfy as
+# written, and a participant must not be handed a list that cannot be met:
+#
+#   switch      Python has no switch statement. A brief that demands one is
+#               demanding a construct the language lacks.
+#   package     The workspace is one flat directory of deliverable files and
+#               a package is a directory; "organised in a package named X" is
+#               impossible here. Where the same instruction also names
+#               functions the package must contain, the functions are kept
+#               and the package is dropped.
+#   convention  "Function names in CamelCase" beside "a function named
+#               min_gelu" cannot both be true of one file, and every reader of
+#               the brief resolves it the same way: the convention is for the
+#               names you choose. The checker reads it that way too — a name
+#               the brief itself demands is exempt from the convention the same
+#               brief states (verifier.mandated_names) — and the instruction is
+#               restated to say so. An interface naming convention has nothing
+#               to be true of at all: Python has no interfaces, and the brief's
+#               own interface name is lowercase.
+# The rules are generic — written as patterns, not per question — so that a
+# screen over any CodeIF instance applies the same policy, and each edit is
+# recorded in the manifest with its reason.
+CODEIF_DROP_PATTERNS = [
+    (re.compile(r"\bswitch statement\b", re.I),
+     "Python has no switch statement"),
+    (re.compile(r"\binterface names?\b.*\bnaming convention\b", re.I),
+     "Python has no interfaces to name, and the interfaces such briefs name "
+     "are lowercase"),
+    (re.compile(r"\borganized in a package named\b", re.I),
+     "the workspace is a single flat directory; a package is a directory"),
+]
+CODEIF_PACKAGE_FUNCTIONS = re.compile(
+    r"^Your code should be organized in a package named \S+?,? (?:which should "
+    r"contain|containing) these (functions|classes) (.*?)\.?$", re.I)
+CODEIF_CONVENTION = re.compile(
+    r"^The (function|class|variable) names in your code should follow the "
+    r"(\S+?)\.? naming convention", re.I)
+CODEIF_MANDATED = [
+    (re.compile(r"\b(function|class|method)s? named [`'\"]?([A-Za-z_]\w*)", re.I), None),
+    (re.compile(r"\bfunction name (?:is|as) [`'\"]?([A-Za-z_]\w*)", re.I), "function"),
+    (re.compile(r"\bfunction signature is [`'\"]?([A-Za-z_]\w*)\s*\(", re.I), "function"),
+    (re.compile(r"\bfunction [`]([A-Za-z_]\w*)[`]", re.I), "function"),
+    (re.compile(r"\bdefine a python function [`]?([A-Za-z_]\w*)\s*\(", re.I), "function"),
+    (re.compile(r"\binclude a function named [`'\"]?([A-Za-z_]\w*)", re.I), "function"),
+    (re.compile(r"\bdefine a class named [`'\"]?([A-Za-z_]\w*)", re.I), "class"),
+]
+
+
+def _convention_rx(name):
+    import code_checker
+    key = name.lower().replace("-", "_")
+    key = code_checker._CONVENTION_ALIASES.get(key, key)
+    return code_checker.CONVENTIONS.get(key)
+
+
+def _mandated(question, texts):
+    """{kind: [names]} the question and instructions demand verbatim."""
+    out = {"function": [], "class": [], "variable": []}
+    for src in [question] + texts:
+        for rx, kind in CODEIF_MANDATED:
+            for m in rx.finditer(src):
+                if kind is None:
+                    k, name = m.group(1).lower(), m.group(2)
+                    k = "function" if k == "method" else k
+                else:
+                    k, name = kind, m.group(1)
+                if name not in out.setdefault(k, []):
+                    out[k].append(name)
+    return out
+
+
+def codeif_instructions(qid, ins, question=""):
+    """The instruction list after the policy above -> (texts, dropped notes)."""
+    texts, dropped = [], []
+    for x in ins:
+        t = x["instruction"].strip()
+        m = CODEIF_PACKAGE_FUNCTIONS.match(t)
+        if m and m.group(2).strip(" []'\""):
+            what = m.group(1).lower()
+            names = ", ".join(n.strip(" []'\"") for n in m.group(2).split(","))
+            new = f"Your code should define these {what}: {names}."
+            texts.append(new)
+            dropped.append(dict(step=f"restated {t!r} as {new!r}",
+                                reason=f"the package is impossible in a flat "
+                                       f"workspace; the {what} it was to "
+                                       f"contain are kept"))
+            continue
+        why = next((r for rx, r in CODEIF_DROP_PATTERNS if rx.search(t)), None)
+        if why:
+            dropped.append(dict(step=f"dropped {t!r}", reason=why))
+            continue
+        texts.append(t)
+    mandated = _mandated(question, texts)
+    for i, t in enumerate(texts):
+        m = CODEIF_CONVENTION.match(t)
+        if not m:
+            continue
+        kind, conv = m.group(1).lower(), m.group(2)
+        rx = _convention_rx(conv)
+        clash = [n for n in mandated.get(kind, []) if rx is not None and not rx.match(n)]
+        if clash:
+            new = (t.rstrip(".") + f", apart from the names this task requires "
+                   f"({', '.join(clash)}).")
+            dropped.append(dict(step=f"restated {t!r} as {new!r}",
+                                reason=f"the brief itself demands the {kind} name(s) "
+                                       f"{', '.join(clash)}, which are not {conv}; "
+                                       f"the convention is for the names the author "
+                                       f"chooses, and the checker exempts the demanded "
+                                       f"ones (verifier.mandated_names)"))
+            texts[i] = new
+    return texts, dropped
+
 
 CODEIF_BRIEF = """{question}
 
@@ -318,40 +452,43 @@ it is graded, so nothing belongs in the chat that belongs in the file.
 """
 
 # What each instance is, for the picker's label and for the note that records
-# why it survived the screen. The number the set is chosen on is how many
-# requirements were violated the moment the agent first wrote solution.py —
-# and, separately, how many of those were still violated after the draft was
-# checked by hand against the brief. The second number is the one that counts.
+# why it survived the screen. `requirements` is the median of the fifth
+# screen's nine extractions (six plain runs, three weighted) over the brief
+# this script writes.
 CODEIF = {
     358: dict(
-        n=1, label="CodeIF 1 — longest subarray not divisible by k, 10 constraints",
+        n=1, label="CodeIF 1 — longest subarray not divisible by k, 9 constraints",
         requirements=14,
         note=("Finds the longest subarray whose sum is not divisible by k, "
-              "with no for-loop, no list, at most one function, and a match "
-              "statement standing in for the switch the brief asks for. It is "
-              "here because the agent gets it WRONG: its unattended answer "
-              "reports length 3 for [-5, 1, 0] with k=4, where the longest "
-              "such subarray is [1, 0] and the answer is 2. The bug is one "
-              "term — it drops a prefix by n - first_nonzero where the "
-              "arithmetic needs n - first_nonzero - 1 — which is what a "
-              "logic error in this benchmark looks like: right on most "
-              "inputs, wrong on the ones that matter. It replaces CodeIF 652, "
-              "whose prime-counting thread the agent got right in three runs "
-              "out of three."),
+              "with no for-loop, no list, at most one function, and an "
+              "interface named SubarrayInterface; the switch statement the "
+              "brief asks for is dropped (Python has none) and the manifest "
+              "records it. Picked in the third screen because the agent gets "
+              "it WRONG: its unattended answer reported length 3 for "
+              "[-5, 1, 0] with k=4, where the longest such subarray is [1, 0] "
+              "and the answer is 2 — one term off in a prefix computation, "
+              "which is what a logic error in this benchmark looks like: "
+              "right on most inputs, wrong on the ones that matter. Restored "
+              "on 2026-09-05 at the user's word, in place of 808; the "
+              "pre-run is a recorded prefix, see the docstring."),
         tested=True),
     1087: dict(
-        n=2, label="CodeIF 2 — 2xN board tilings, 10 constraints",
+        n=2, label="CodeIF 2 — tiling a 2 x N board with dominos and trominos, 10 constraints",
         requirements=16,
         note=("Counts the tilings of a 2xN board with dominos and L-trominos "
-              "under a no-if-statement rule and a pile of grafted naming "
-              "constraints. It is here because the agent gets the count "
-              "WRONG and keeps getting it wrong: one run returned 12, 28 and "
-              "65 for N = 4, 5, 6 against answers of 11, 24 and 53, another "
-              "returned 1, 5, 21, 89, which is not even the same sequence. "
-              "The recurrence is easy to state and easy to mis-state, which "
-              "is the whole of the difficulty — the constraints are wrapping. "
-              "Its catch is that nothing in the app sees this: the run stops "
-              "green, and the requirement that should notice is judged."),
+              "modulo 1e9+7, under a no-if-statement rule and a pile of grafted "
+              "naming constraints (an interface remove_shipment, a class "
+              "AnalyzeDwa with two properties, an object tys, numpy imported, "
+              "a finally). Picked in the third screen because the agent gets "
+              "the count WRONG and keeps getting it wrong: one run returned "
+              "12, 28 and 65 for N = 4, 5, 6 against 11, 24 and 53, another "
+              "1, 5, 21, 89, which is not even the same sequence. The "
+              "recurrence is easy to state and easy to mis-state, which is "
+              "the whole of the difficulty — the constraints are wrapping. "
+              "Nothing in the app sees this: the run stops green, and the "
+              "requirement that should notice is judged. Restored on "
+              "2026-09-05 at the user's word, in place of 891; the pre-run is "
+              "a recorded prefix, see the docstring."),
         tested=True),
 }
 
@@ -372,16 +509,14 @@ def build_codeif(meta, briefs):
         n = spec["n"]
         task = f"codeif_{n}"
         ins = row["instruction_list"]
-        # Nothing is dropped from either list — the earlier pair needed three
-        # instructions removed as unsatisfiable, and these two were screened
-        # partly on not needing that. If a future upstream revision changes a
-        # list, this count is what says so.
         if len(ins) != len(set(x["instruction"] for x in ins)):
             raise RuntimeError(f"{task}: the upstream instruction list repeats "
                                f"itself, which is not the row this was written "
                                f"against")
         question = row["question"].strip()
-        dropped = []
+        texts, dropped = codeif_instructions(qid, ins, question)
+        for d in dropped:
+            log(f"            {qid}: {d['step'][:70]}")
         if qid in CODEIF_DROP_SENTENCE:
             sentence, reason = CODEIF_DROP_SENTENCE[qid]
             if question.count(sentence) != 1:
@@ -394,15 +529,14 @@ def build_codeif(meta, briefs):
 
         briefs[task] = CODEIF_BRIEF.format(
             question=question,
-            instructions="\n".join(f"{i}. {x['instruction']}"
-                                    for i, x in enumerate(ins, start=1)))
+            instructions="\n".join(f"{i}. {t}" for i, t in enumerate(texts, start=1)))
         meta.append(dict(
             id=task, n=n, domain="Code generation", benchmark="CodeIF",
             attachments=[], label=spec["label"], dropped=dropped,
             source=(f"CodeIF (ACL 2025 Industry) question_id {qid}, "
                     f"{row['meta_info']['item_set']} split, "
                     f"{row['meta_info']['programming_language']}, "
-                    f"{len(ins)} instructions"),
+                    f"{len(ins)} instructions upstream, {len(texts)} kept"),
             grader=("the checker's code properties for every constraint that "
                     "names an identifier, a construct or a cap — which is most "
                     "of the list — and the judge for what the code has to "
@@ -433,69 +567,102 @@ def build_codeif(meta, briefs):
 #
 # The two purposes deliberately sit on DIFFERENT dirty tables. menu ships
 # thirty purposes over ten distinct tables, and thirteen of those purposes
-# share one table. p13 sits on a table of its own, so any partner clears that
-# bar; what picks the partner out of the rest is the requirement count, and
-# that is set by how many rules the cleaning paragraph has to state, not by how
-# many cells change. p28 was the partner first and measured at 25 — five dirty
-# columns is five paragraphs of repair. p18 replaced it at a recorded 17 and
-# then measured 21, 24 and 24 on three fresh runs of the extractor, so it went
-# the same way: its repair states about ten rules across two columns.
+# share one table — p26 and p28 among them, so those two could never be a
+# pair: a participant would be handed the same hundred rows twice. p18 sits
+# on a table of its own.
 #
-# p15 was tried next and measured 23, 23 and 16: two dirty columns is still
-# seven rules, and the extractor splits a named list of misspellings into one
-# requirement per spelling as readily as into one. What decides the count is
-# how many things the paragraph names, so the partner has to be the instance
-# that names fewest.
-#
-# p4 is that instance. One dirty column, four stated rules, eight changed cells
-# — and it pairs with p13 precisely because it is the same promise at a
-# different scale: 1,992 cells to leave alone against p13's 1,923, and a fold
-# list that stops where it stops. p13 folds every misspelling of DOLLARS it
-# meets; p4 folds five spellings of DINNER and leaves BREAKFAST MENU alone,
-# which is the same instruction read twice and obeyed differently.
+# What picks the pair, on the repaired checker, is what is on disk when the
+# run stops: p18 and p14 are the two instances whose table still comes out
+# wrong in some runs (one cell, two cells), and their traps are mirror
+# images of each other. p26 (its date sentence corrected), p27 and p28 were
+# repaired identically to gold in every run; what held them, where anything
+# did, was a judged chip that was wrong.
 MENU = [
     dict(
-        n=3, pid=26, stem="menu_p26",
-        label="AutoDCWorkflow 1 — menu dates, 100 x 21, 4 dirty columns",
-        intro="The attached table menu_p26.csv holds a hundred historical menu "
-              "records across twenty-one columns; the one the question depends "
-              "on — the date each menu was published — is written four "
-              "different ways, and three more columns carry padding.",
-        requirements=11,
-        clean="""In cleaned.csv's date column, write every date as
-YYYY-MM-DDT00:00:00Z, so 01/17/1973 becomes 1973-01-17T00:00:00Z and
-1900.01.25 becomes 1900-01-25T00:00:00Z. The source writes them four ways —
-year first with hyphens, year first with dots, month first with hyphens, month
-first with slashes — and in the year-first ones the day sometimes comes before
-the month, so 1949-23-12 is the twenty-third of December and belongs at
-1949-12-23T00:00:00Z. A number over twelve is the day. Blank dates stay blank.
-In cleaned.csv's event, occasion and notes columns, trim the padded whitespace
-and change nothing else about them: capitalisation, spelling and punctuation
-stay exactly as they are. In cleaned.csv, leave every other column exactly as
-it is.""",
-        dropped=[]),
+        n=3, pid=25, stem="menu_p25",
+        label="AutoDCWorkflow 1 — menu sponsors and currencies, 100 x 21, 2 dirty columns",
+        intro="The attached table menu_p25.csv holds a hundred historical menu "
+              "records across twenty-one columns; the two the question depends on "
+              "— the sponsor who issued each menu and the currency it prices in — "
+              "are dirty, and three more columns carry padding.",
+        requirements=14,
+        header_free=True,
+        clean="""In cleaned.csv's sponsor column, drop the square brackets that enclose
+most of the names and put every value in uppercase, so [battery park hotel]
+becomes BATTERY PARK HOTEL and toots shor becomes TOOTS SHOR. Two names are
+corrected as they are folded: [Adams' Restaurant] and [Adam's Restaurant] both
+become ADAM'S RESTAURANT, and [NORDDEUTSCHERRR LLOYD BREMEN] becomes
+NORDDEUTSCHER LLOYD BREMEN. Four values are emptied rather than folded, because
+they are not sponsors: [?] and the three double-bracketed notes saying that a
+restaurant name and/or location was not given. In cleaned.csv's currency column,
+fold the three misspellings of the dollar — Dolars, Doller and Dollers — onto
+Dollars, and empty the five values that are not currencies: None, n/a, N/A,
+unknown and null. In
+cleaned.csv's event, occasion and notes columns, trim the padded whitespace and
+change nothing else about them: capitalisation, spelling and punctuation stay
+exactly as they are. In cleaned.csv, leave every other column exactly as it
+is.""",
+        dropped=[],
+        note=("Sixth screen (weighted ten-step pre-run): the traps are the "
+              "sponsor placeholders — [?] and three double-bracketed 'not "
+              "given' notes that are emptied where every other bracketed "
+              "value is unbracketed and uppercased — and the currency "
+              "column's five non-values. The weighted agent completed it at its "
+              "first halt in 2 runs of 9 and left the placeholders wrong in "
+              "six (2 to 4 cells; once the whole sponsor column untouched at "
+              "a reply); the plain agent from scratch had the table identical "
+              "to gold in 3 of 6. 11-18 requirements over nine extractions, "
+              "median 14. Recorded pre-run: 4 steps, paused by the attempt rule "
+              "with four chips red — currency folds and trims not done, a "
+              "lone ? left where [?] should be emptied — and no answer yet. "
+              "The brief says "
+              "nothing about the currency values it does not change: "
+              "'Deutsche Marks, Italian Lire and Drachmas stay exactly as "
+              "they are' was extracted as a fold of the three onto the "
+              "first, and 'every other currency value stays exactly as it "
+              "is' as a freeze on every other COLUMN, red over the sponsor "
+              "repairs the same brief asks for — both false chips over "
+              "tables identical to gold, so the sentence is gone.")),
     dict(
-        n=4, pid=18, stem="menu_p18",
-        label="AutoDCWorkflow 2 — menu sponsors, 100 x 20, 2 dirty columns",
-        intro="The attached table menu_p18.csv holds a hundred historical menu "
+        n=4, pid=14, stem="menu_p14",
+        label="AutoDCWorkflow 2 — menu dish counts, 100 x 20, 2 dirty columns",
+        intro="The attached table menu_p14.csv holds a hundred historical menu "
               "records across twenty columns; the two the question depends on "
-              "— the sponsor who issued each menu and the meal it was served "
-              "for — are dirty.",
-        requirements=17,
-        clean="""In cleaned.csv's sponsor column, turn every semicolon,
-underscore and hyphen into a space, collapse runs of spaces into one, trim, and
-put the result in uppercase, so HAMBURG-AMERIKA  LINIE becomes HAMBURG AMERIKA
-LINIE and Toots _Shor becomes TOOTS SHOR. Three values are corrected as they
-are folded: NORDDEUTSCHERRR LLOYD BREMEN becomes NORDDEUTSCHER LLOYD BREMEN,
-and Adams' Restaurant and Adam's Restaurant both become ADAM'S RESTAURANT. Two
-are emptied rather than folded: a lone ? and the placeholder [Restaurant name
-and/or location not given] — and only that one, so [Restaurant And/Or Location
-Not Given] is uppercased like any other value. In cleaned.csv's event column,
-collapse the spaces and uppercase every value, then fold the four that name a
-meal in more words than it needs: BREAKFAST MENU is BREAKFAST, DINNER (?) and
-DINNER TO ABOVE are both DINNER, and LUNCHEON is LUNCH. In cleaned.csv, leave
-every other column exactly as it is.""",
-        dropped=[]),
+              "— the sponsor who issued each menu and how many dishes it lists "
+              "— are dirty.",
+        requirements=12,
+        clean="""In cleaned.csv's sponsor column, put every value in uppercase, so
+Southern Pacific becomes SOUTHERN PACIFIC and the placeholder [Restaurant name
+and/or location not given] becomes [RESTAURANT AND/OR LOCATION NOT GIVEN]. One
+name is corrected as it is folded: Adams' Restaurant becomes ADAM'S RESTAURANT.
+Nothing else about a name changes — a misspelling stays misspelled, only
+uppercased. In cleaned.csv's dish_count column, drop the trailing .0 and keep
+the whole number, so 22.0 becomes 22 and 546.0 becomes 546. In cleaned.csv,
+leave every other column exactly as it is.""",
+        dropped=[],
+        note=("Fifth screen, ten-step budget: the plain agent finished at "
+              "step 8 five times and ran to the cap once, and the table was "
+              "wrong in the same two sponsor cells every time — rows 24 and "
+              "30, where the placeholder is uppercased with the word NAME "
+              "kept, [RESTAURANT NAME AND/OR LOCATION NOT GIVEN], and the "
+              "brief's example drops it. The weighted agent, told by the "
+              "checker, had it identical to gold once (right from step 4, "
+              "finish at step 6) and was held at step 9 twice with the two "
+              "cells wrong. The "
+              "only menu instance the plain agent never completed. Sixth screen: "
+              "weighted complete at the first halt in 3 of 9, the other six "
+              "wrong in the same two cells. Recorded pre-run: 10 steps, paused, "
+              "one sponsor cell left in mixed case with the uppercase chip "
+              "red, plus a judged chip. "
+              "Fourth screen: the trap is the opposite of p18's: here the bracketed "
+              "placeholder is uppercased like any other value and the "
+              "misspelt NORDDEUTSCHERRR LLOYD BREMEN stays misspelt, where "
+              "p18 empties the one and corrects the other, and an agent that "
+              "remembers the other table gets this one wrong. On the repaired "
+              "checker the run finishes at its first stop in three runs of "
+              "three (steps 6, 12, 6); the table was identical to gold twice "
+              "and wrong once, in two sponsor cells — the placeholder written "
+              "as p18's brief would have it. 119 cells change.")),
 ]
 
 DCW_BRIEF = """{intro} The question, quoted from the benchmark: "{purpose}"
@@ -550,15 +717,11 @@ def build_menu(meta, briefs, purposes):
             note=(f"{dirty} cells change out of "
                   f"{(len(rows)-1) * len(rows[0]):,}; the other "
                   f"{(len(rows)-1) * len(rows[0]) - dirty:,} are the promise "
-                  f"the freeze exists to keep, and table_checker now decides "
-                  f"that promise by comparing the deliverable with its source "
+                  f"the freeze exists to keep, and table_checker decides that "
+                  f"promise by comparing the deliverable with its source "
                   f"instead of by reading it. The cleaning rule was checked "
-                  f"against the gold table cell by cell before shipping. This "
-                  f"pair is the one width of repair the agent does not get "
-                  f"right: p13 left three cells of a frozen column changed, "
-                  f"p18 uppercased a placeholder the brief empties. Narrower "
-                  f"instances — p4, p9, p12 — were all repaired perfectly and "
-                  f"are recorded in the docstring as ruled out."),
+                  f"against the gold table cell by cell before shipping. "
+                  + t["note"]),
             tested=True))
         log(f"            task {n}: {t['stem']}.csv, {len(rows)-1} rows x "
             f"{len(rows[0])} cols, {dirty} cells dirty, purpose {t['pid']}")
@@ -569,11 +732,17 @@ def build_menu(meta, briefs, purposes):
 # The triples are reference material, so they are attached rather than pasted
 # into the brief — the same rule the tables follow. That is also what keeps the
 # requirement list short: the brief states four things and the eighty-odd facts
-# the article has to carry sit in a file the requirement checker never sees.
+# the biography has to carry sit in a file the requirement checker never sees.
 #
 # One restatement, because moving the facts makes the upstream wording false:
 # "provided below" becomes "provided in the attached file". Nothing else in the
 # task section is touched.
+#
+# The word budget is the one chip on this task a parser decides, and both
+# instances are outside it at most first stops. What the attempt rule fires on
+# is usually the judged chip beside it — every fact from the file, nothing that
+# is not — which the agent aims at three times and cannot turn, and whether
+# that verdict is right is for the participant to weigh.
 KG_BELOW = "provided below in Subject-Predicate-Object (Triple) format"
 KG_ATTACHED = "provided in the attached file in Subject-Predicate-Object (Triple) format"
 
@@ -586,10 +755,46 @@ comes from there, and it states nothing that is not there.
 Write the biography to biography.md. For the target length, treat "around 2048
 words" as between 2,000 and 2,100 words."""
 
+KG = {
+    8: dict(
+        n=5, requirements=6,
+        note=("Fifth screen, ten-step budget: never completed in nine runs. "
+              "The plain agent finished at steps 4 to 6 five times and ran "
+              "to the cap once, with 6 to 15 of the 99 fact objects absent "
+              "from the biography every time and the word count out of "
+              "budget twice; the weighted agent paused at steps 4 to 5 "
+              "three times of three, resumed to the cap, and was still "
+              "missing 9 to 13 objects and out of budget every time. Sixth screen: "
+              "0 of 9 weighted at the first halt, paused at steps 5-7. "
+              "Recorded pre-run: 6 steps, paused, 2,120 words with the budget "
+              "chip red, 16 objects absent. "
+              "Fourth screen: paused by the attempt rule in three unattended runs of three "
+              "on the repaired checker, at steps 6, 10 and 8, each time on "
+              "the judged chip — state nothing the file does not — aimed at "
+              "three times and still red; out of budget once (2,444 words) "
+              "and in budget twice. Across nine runs over the day it paused "
+              "nine times and was out of budget in five. 100 triples.")),
+    11: dict(
+        n=6, requirements=7,
+        note=("Fifth screen, ten-step budget: never completed in nine runs. "
+              "The plain agent finished at steps 4 to 9 with 2 to 18 of the "
+              "81 fact objects absent every time and out of budget once; "
+              "the weighted agent paused at steps 4 to 5 three times of "
+              "three with 2 to 4 objects absent. Sixth screen: 0 of 9 weighted, "
+              "paused at steps 4-6. Recorded pre-run: 4 steps, paused, 2,182 "
+              "words with the budget chip red. "
+              "Fourth screen: paused in three of three, at steps 5, 4 and 4, on the same "
+              "judged chip, and out of budget in two of three: 2,160 and "
+              "2,164 words against 2,000 to 2,100. Across nine runs over the "
+              "day it paused nine times and was out of budget in six. 82 "
+              "triples, the smallest file in the set.")),
+}
+
 
 def build_kg(meta, briefs, picked):
-    for i, (ordinal, row) in enumerate(picked):
-        n = 5 + i
+    for ordinal, row in picked:
+        spec = KG[ordinal]
+        n = spec["n"]
         prompt = row["prompt"]
         marker = "**Input Facts (Triples):**"
         if prompt.count(marker) != 1:
@@ -600,6 +805,9 @@ def build_kg(meta, briefs, picked):
             raise RuntimeError(f"kg_{n}: the sentence to restate appears "
                                f"{head.count(KG_BELOW)} times, expected 1")
         head = head.replace(KG_BELOW, KG_ATTACHED)
+        if "around 2048 words" not in prompt:
+            raise RuntimeError(f"kg_{n}: the upstream target is not 2048 words, "
+                               f"which is not the row this was written against")
 
         body = prompt[prompt.index(marker) + len(marker):]
         triples = [ln.strip()[2:] for ln in body.splitlines()
@@ -630,22 +838,12 @@ def build_kg(meta, briefs, picked):
             source=f"LongWeave {KG_TASK} (arXiv:2510.24345), MIT, instance "
                    f"{ordinal} in file order, slug {slug}",
             gold=f"gold/{stem}.json",
-            grader=f"the {len(targets)} target sentences in gold/{stem}.json — "
-                   f"recall of the facts the biography had to carry, plus the "
-                   f"word budget. No judge is involved in the recall half.",
-            # measured separately: the 119-triple row extracts one more
-            # requirement than the 81-triple one
-            requirements=7 if n == 5 else 6,
-            note=("Four stated constraints instead of fifty statements: 7 "
-                  "extracted requirements against the AP-style pair's 46 and "
-                  "72. The difficulty sits in the attachment, and the two "
-                  "instances fail differently. #1 carries 119 triples into a "
-                  "2,000-word budget and overruns it — 2,372 and 2,393 words "
-                  "on two unattended runs, which is counted rather than "
-                  "judged. #6 carries 81, lands in budget at 2,013, and comes "
-                  "out as 31 short paragraphs that restate each other. The "
-                  "81-triple instance that used to be task 5 wrote a correct "
-                  "biography and had to go."),
+            grader=f"the word budget, counted — 2,000 to 2,100 words — plus "
+                   f"the {len(targets)} target sentences in gold/{stem}.json "
+                   f"for recall of the facts the biography had to carry. No "
+                   f"judge is involved in either.",
+            requirements=spec["requirements"],
+            note=spec["note"],
             tested=True))
         log(f"            task {n}: {stem}.txt, {len(triples)} triples, "
             f"{len(targets)} gold sentences, slug {slug}")

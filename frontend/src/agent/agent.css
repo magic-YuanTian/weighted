@@ -120,6 +120,8 @@
 /* one step can settle a dozen requirements. The chip row must be allowed to
    wrap and to shrink, or its intrinsic width pushes the whole step past the
    column edge. */
+.wt4 .step .aim { font-family:var(--mono); font-size:11px; color:var(--ink-3); white-space:nowrap; flex-shrink:0; }
+.wt4 .step .aim .linkbtn { font-size:11px; }
 .wt4 .step .tail { margin-left:auto; display:flex; gap:4px 5px; align-items:center;
                    flex:0 1 auto; min-width:0; flex-wrap:wrap; justify-content:flex-end; }
 .wt4 .step .add { color:var(--ok); } .wt4 .step .del { color:var(--bad); }
@@ -170,6 +172,19 @@
 }
 .wt4 .composer .bar { display:flex; align-items:center; gap:8px; margin-top:6px; font-family:var(--mono); font-size:11px; color:var(--ink-3); }
 .wt4 .sendbtn { margin-left:auto; background:var(--accent); color:#fff; padding:5px 13px; border-radius:4px; font-size:13px; font-family:var(--mono); }
+.wt4 .composer textarea:disabled { background:var(--surface-2); color:var(--ink-3); }
+/* The task clock and the hand-in button, beside the send button: the two
+   controls the protocol gives the participant, on the row they already use. */
+.wt4 .clock { font-variant-numeric:tabular-nums; color:var(--ink-3); }
+.wt4 .clock[data-over="true"] { color:var(--warn); font-weight:600; }
+.wt4 .handin {
+  font-family:var(--mono); font-size:11px; color:var(--ink-2);
+  border:1px solid var(--line-2); border-radius:4px; padding:3px 9px; background:var(--surface);
+}
+.wt4 .handin:hover { color:var(--ink); background:var(--surface-3); }
+.wt4 .handin[data-armed="true"] { color:var(--bad); border-color:var(--bad); background:var(--bad-soft); font-weight:600; }
+/* A read-only document: the chat baseline, and any task already handed in. */
+.wt4 .filetext[contenteditable="false"] { cursor:default; }
 .wt4 .ghostbtn { border:1px solid var(--line-2); border-radius:4px; padding:4px 9px; font-family:var(--mono); font-size:11px; color:var(--ink-2); }
 .wt4 .ghostbtn:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
 
@@ -230,11 +245,10 @@
 .wt4 .req[data-v="unverified"] .glyph, .wt4 .req[data-v="paused"] .glyph { color:var(--idle); }
 .wt4 .req .rid { font-size:13px; font-weight:600; color:var(--ink-3); font-variant-numeric:tabular-nums; margin-right:6px; }
 .wt4 .req .text { font-size:13px; line-height:1.35; }
-/* rows are always two lines at most — selection changes colour, never size;
-   the full wording is in the tooltip and in the edit box */
-.wt4 .req .text {
-  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
-}
+/* the wording is shown whole, however long — a row grows with its text;
+   selection changes colour, never size (the two-line clamp that used to sit
+   here abbreviated the requirement, and the study wants it read in full) */
+.wt4 .req .text { min-width:0; overflow-wrap:anywhere; }
 .wt4 .req[data-v="paused"] .text { color:var(--ink-3); }
 .wt4 .req .detail { font-family:var(--mono); font-size:11px; color:var(--ink-3); margin-top:2px; word-break:break-word; }
 .wt4 .req[data-v="violated"] .detail { color:var(--bad); }

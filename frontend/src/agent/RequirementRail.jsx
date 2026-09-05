@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { useScrollTelemetry } from './telemetry';
 
 const DEV = window.location.hash.includes('dev');
 
@@ -93,6 +94,7 @@ export default function RequirementRail({ snap, selected, setSelected, onJump, o
   const reqs = (snap && snap.requirements) || [];
   const counts = (snap && snap.counts) || {};
   const { cols, ids } = useTape(snap);
+  const onScroll = useScrollTelemetry(snap && snap.sessionId, 'rail');
 
   /* Extraction order, always. Sorting by verdict put the problems on top, but
      it also moved every row whenever a verdict changed — so the list you
@@ -129,7 +131,7 @@ export default function RequirementRail({ snap, selected, setSelected, onJump, o
     <div className="col">
       <div className="colhead">Requirements</div>
 
-      <div className="scroll">
+      <div className="scroll" onScroll={onScroll}>
         <div className="rail">
           {sorted.map((r) => {
             const rep = r.report || {};

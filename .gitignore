@@ -8,3 +8,5 @@ backend/runs/
 .env
 .env.local
 backend/tasks/
+paper/
+backend/analysis/

@@ -10,8 +10,10 @@ import re
 from tenacity import (retry, retry_if_not_exception_type,
                       stop_after_attempt, wait_random_exponential)
 
-from llm_api import MODEL, client
+from llm_api import AGENT_MODEL, MODEL, client
 
+# The extractor and the judge run on MODEL; the agent's own turns on
+# AGENT_MODEL (see llm_api). Callers that pass no model get MODEL.
 JUDGE_MODEL = MODEL
 
 
@@ -35,23 +37,39 @@ def chat(messages, tools=None, temperature=0.3, model=None, max_tokens=8000):
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 
-def chat_json(messages, temperature=0, model=None, max_tokens=12000):
-    """Completion parsed as JSON. Returns {} when the model returns junk —
-    callers degrade gracefully rather than failing a turn."""
-    msg = chat(messages, temperature=temperature, model=model,
-               max_tokens=max_tokens)
-    raw = (msg.content or "").strip()
+def _parse_json(raw):
     raw = _FENCE.sub("", raw).strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}")
-        if 0 <= start < end:
-            try:
-                return json.loads(raw[start:end + 1])
-            except json.JSONDecodeError:
-                pass
-    print(f"[agent.llm] non-JSON response: {raw[:200]!r}")
+    for candidate in (raw, raw[raw.find("{"):raw.rfind("}") + 1]):
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def chat_json(messages, temperature=0, model=None, max_tokens=12000, retries=2):
+    """Completion parsed as JSON. Returns {} when the model returns junk —
+    callers degrade gracefully rather than failing a turn.
+
+    Junk happens: about one extraction in six over the biography briefs came
+    back as a complete JSON object with one stray glyph before the closing
+    brace (`"questions":[]ના}`), and an extraction that fails is a rail with
+    nothing on it — the run then finishes with nothing to check it against.
+    Nothing about the prompt causes it, so the answer is to ask again: the
+    same call, up to `retries` more times, is what a person would do.
+    """
+    raw = ""
+    for attempt in range(retries + 1):
+        msg = chat(messages, temperature=temperature, model=model,
+                   max_tokens=max_tokens)
+        raw = (msg.content or "").strip()
+        data = _parse_json(raw)
+        if data is not None:
+            return data
+        print(f"[agent.llm] non-JSON response (attempt {attempt + 1} of "
+              f"{retries + 1}): {raw[:200]!r}")
     return {}
 
 

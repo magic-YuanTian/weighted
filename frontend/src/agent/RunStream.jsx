@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PILOT } from './pilot';
 import api from './api';
 import { isDelimited, sepFor, shapeTable } from './delimited';
+import { useScrollTelemetry } from './telemetry';
 
 const DEV = window.location.hash.includes('dev');
 
@@ -95,6 +96,22 @@ const StepCard = React.memo(function StepCard({ ev, open, onToggle, onSelectReq,
         <span className="caret">▸</span>
         <span className="id">Step {ev.step}</span>
         <span className="act">{describeStep(ev)}</span>
+        {/* The agent says which requirements a change is for; the loop counts
+            attempts per requirement from exactly this, so it is shown where
+            the counting happens rather than kept in the drawer. */}
+        {(meta.targets || []).length > 0 && (
+          <span className="aim">
+            for{' '}
+            {meta.targets.map((id, i) => (
+              <React.Fragment key={id}>
+                {i > 0 && ', '}
+                <button className="linkbtn" onClick={(e) => { e.stopPropagation(); onSelectReq(id); }}>
+                  {id}
+                </button>
+              </React.Fragment>
+            ))}
+          </span>
+        )}
         <ChipRow chips={ev.chips} onSelectReq={onSelectReq} />
       </div>
       {/* The agent says why it is about to do a thing, in its own words, on
@@ -262,15 +279,55 @@ const AttachmentViewer = React.memo(function AttachmentViewer({ sessionId, name,
 
 /* The condition, as a setting rather than as a name. A participant should be
    able to find and change it — it is the one control the study asks them to
-   set — without being told which of the two is the treatment, so the options
-   are numbered and the screen never says "baseline" anywhere.
+   set — without being told which of the three is the treatment, so the
+   options are numbered and the screen never says "baseline" anywhere.
 
    SETTINGS is the numbering, in order. Changing it renames what participants
-   see; it does not change what the server is asked for. */
+   see; it does not change what the server is asked for. The numbers are the
+   URL tokens' (s1, s2, s3), so a bookmarked link keeps meaning what it did
+   when the third condition was added after the first two. */
 const SETTINGS = [
   { mode: 'weighted', label: 'Setting 1' },
   { mode: 'baseline', label: 'Setting 2' },
+  { mode: 'insitu', label: 'Setting 3' },
 ];
+
+/* The task clock, mm:ss, from the first message. Amber past the soft limit
+   the server announced; nothing is hidden or stopped by it — the hard stop is
+   AgentApp's, and it hands the work in. */
+function Clock({ seconds, soft }) {
+  const s = Math.max(0, Math.floor(seconds));
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return (
+    <span className="clock" data-over={String(!!(soft && s >= soft))}
+          title="time since the task began">
+      {mm}:{ss}
+    </span>
+  );
+}
+
+/* Handing in ends the task, so it takes two clicks, five seconds apart at
+   most — a confirm dialog would do the same job, but jsdom has none and a
+   modal over a running agent is one more thing to explain. */
+function HandIn({ onHandIn }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return undefined;
+    const t = setTimeout(() => setArmed(false), 5000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      className="handin"
+      data-armed={String(armed)}
+      title="Hand the work in as it stands. This ends the task."
+      onClick={() => { if (armed) { setArmed(false); onHandIn(); } else setArmed(true); }}
+    >
+      {armed ? 'Hand in — click again to confirm' : 'Hand in'}
+    </button>
+  );
+}
 
 function SettingPicker({ mode, onSwitch }) {
   return (
@@ -291,7 +348,7 @@ function SettingPicker({ mode, onSwitch }) {
 
 export default function RunStream({ snap, focus, running, pending, busy, outbox, onRun, onPause,
                                     onSend, onAnswer, onSelectReq, onJump, selected,
-                                    mode, onSwitchMode }) {
+                                    mode, onSwitchMode, clock, closed, onHandIn }) {
   const [openSteps, setOpenSteps] = useState(() => new Set());
   const [text, setText] = useState('');
   // The benchmark tasks are served from disk, not bundled: several ship
@@ -303,6 +360,14 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
   const closePreview = useCallback(() => setPreview(null), []);
   const [hitStep, setHitStep] = useState(null);
   const scrollRef = useRef(null);
+  const sessionId = snap && snap.sessionId;
+  const onScroll = useScrollTelemetry(sessionId, 'chat');
+  // Opening an attachment is a look at the source data — a verification act,
+  // and one MUSE's timelines count. Logged with the file's name.
+  const openPreview = useCallback((name) => {
+    setPreview(name);
+    if (sessionId) api.telemetry(sessionId, 'attachment-open', { name });
+  }, [sessionId]);
 
   useEffect(() => {
     let live = true;
@@ -346,7 +411,12 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
 
   const toggle = (step) => setOpenSteps((prev) => {
     const next = new Set(prev);
-    if (next.has(step)) next.delete(step); else next.add(step);
+    const open = !next.has(step);
+    if (open) next.add(step); else next.delete(step);
+    // "Expand activity" in MUSE's terms: the participant went looking at what
+    // a step actually did, which is the reading the summary line exists to
+    // make unnecessary. Both directions are logged; only opens are counted.
+    if (sessionId) api.telemetry(sessionId, 'step-expand', { step, open });
     return next;
   });
 
@@ -411,7 +481,7 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
           </div>
         )}
       </div>
-      <div className="scroll" ref={scrollRef}>
+      <div className="scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="stream">
           {/* An empty session is a conversation that has not started, not a
               form waiting to be filled: the composer's placeholder says what
@@ -427,6 +497,12 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                     onChange={(e) => {
                       const t = tasks.find((x) => x.id === e.target.value);
                       setPicked(e.target.value);
+                      // the task id goes into the session's study record, so
+                      // the analysis never has to recognise a task by its brief
+                      if (t && sessionId) {
+                        api.telemetry(sessionId, 'task-pick',
+                                      { id: t.id, n: t.n, domain: t.domain, label: t.label });
+                      }
                       if (t) setText(t.brief);
                     }}
                   >
@@ -469,7 +545,7 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                         <button
                           key={n}
                           className="filechip"
-                          onClick={() => setPreview(n)}
+                          onClick={() => openPreview(n)}
                           title="open the attached file"
                         >
                           <span className="ic" aria-hidden="true">▤</span>
@@ -537,6 +613,12 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
                 );
               case 'notice':
                 return <div className="notice" key={ev.i}>{ev.text}</div>;
+              case 'resume':
+                // The user pressed continue after a pause. It is a line in the
+                // stream because the attempt counts start over here, and a
+                // later pause on the same requirement reads differently if
+                // the reader can see that they already waved it through once.
+                return <div className="inject" key={ev.i}>you continued the run — attempts counted from here</div>;
               case 'trace':
                 // Something the run recovered from on its own, kept for the
                 // record. Amber is for what a person can act on; this is not
@@ -624,15 +706,22 @@ export default function RunStream({ snap, focus, running, pending, busy, outbox,
       <div className="composer">
         <textarea
           value={text}
-          placeholder="Describe the task, or ask for a change…"
+          disabled={!!closed}
+          placeholder={closed ? 'The work has been handed in.' : 'Describe the task, or ask for a change…'}
           onChange={(e) => { setText(e.target.value); setPicked(''); }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
           }}
         />
         <div className="bar">
-          <span>{snap && snap.status === 'done' ? 'run finished' : ''}</span>
-          <button className="sendbtn" disabled={!text.trim() || !!busy}
+          <span>{closed ? 'handed in' : (snap && snap.status === 'done' ? 'run finished' : '')}</span>
+          {clock !== null && clock !== undefined && (
+            <Clock seconds={clock} soft={snap && snap.limits && snap.limits.soft} />
+          )}
+          {clock !== null && clock !== undefined && !closed && onHandIn && (
+            <HandIn onHandIn={onHandIn} />
+          )}
+          <button className="sendbtn" disabled={!!closed || !text.trim() || !!busy}
                   onClick={submit}>Send ⏎</button>
         </div>
       </div>

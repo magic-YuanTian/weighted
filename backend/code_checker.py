@@ -33,6 +33,8 @@ CONVENTIONS = {
     "upper_snake": re.compile(r"^_?[A-Z][A-Z0-9_]*$"),
 }
 
+_PYTHON_NAMES = {"self", "cls"}
+
 _CONVENTION_ALIASES = {
     "pascalcase": "camelcase", "camel_case": "camelcase",
     "upper_snake_case": "upper_snake", "screaming_snake_case": "upper_snake",
@@ -100,7 +102,7 @@ def _cap(params, *keys):
     return None
 
 
-PROPS = ("naming", "defines", "imports", "assigned_once", "module_level",
+PROPS = ("returns", "naming", "defines", "imports", "assigned_once", "module_level",
          "initializes", "uses", "forbids", "forbids_names", "single_return",
          "max_function_lines", "max_line_length", "no_blank_lines_in_body",
          "docstrings", "max_classes", "max_functions", "max_total_lines")
@@ -276,6 +278,12 @@ def check(prop, params, source):
     return _PROPS[prop](tree, params or {}, source, starts)
 
 
+def _returns(tree, params, source, starts):
+    # Static placeholder: the verifier runs the call (verifier._run_returns),
+    # because execution needs the workspace and a subprocess, not a parse.
+    return "unverified", "the verifier runs this one", []
+
+
 def usable(prop, params):
     """Can this property answer at all, with these parameters?
 
@@ -293,6 +301,9 @@ def usable(prop, params):
     or one that is not what it claims to be (a placeholder where a name should
     be, a language where a module should be).
     """
+    if (prop or "").strip().lower() == "returns":
+        params = params or {}
+        return bool(str(params.get("call") or "").strip()) and "expect" in params
     return check(prop, params, "")[0] != "unverified"
 
 
@@ -318,9 +329,20 @@ def _naming(tree, params, source, starts):
 
     if not pairs:
         return "satisfied", f"no {label} names to check", []
+    # Names that are not the author's to choose. A dunder is Python's name
+    # (`__init__` was reported as "not camelcase" against a CamelCase rule);
+    # self and cls are convention; and a name the brief itself demands — "a
+    # function named min_gelu", beside "function names in CamelCase" — is
+    # exempt from the convention the same brief states, because the two are
+    # otherwise unsatisfiable together and no reader of the brief means them
+    # that way. The verifier passes those in as `exempt`.
+    exempt = {str(x) for x in (params.get("exempt") or [])}
     bad, seen = [], set()
     for name, node in pairs:
         if name in seen or rx.match(name):
+            continue
+        if (name.startswith("__") and name.endswith("__")) or name in _PYTHON_NAMES \
+                or name in exempt:
             continue
         seen.add(name)
         bad.append((name, node))
@@ -686,6 +708,7 @@ def _max_classes(tree, params, source, starts):
 
 
 _PROPS = {
+    "returns": _returns,
     "naming": _naming,
     "defines": _defines,
     "imports": _imports,

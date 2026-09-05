@@ -12,6 +12,7 @@ The contract from AGENT_UI_DESIGN.md §0 and §5:
 """
 
 import hashlib
+import os
 import re
 
 import checker  # v3 Tier-1 checks, reused as-is
@@ -185,7 +186,7 @@ _DELIVERS = re.compile(
     r"stor|plac)\w*\b", re.I)
 
 
-def _delivery(req, doc):
+def _delivery(req, doc, exclude=()):
     """(verdict, detail, filename) for "put the deliverable in a file called X",
     or None when the requirement is not that.
 
@@ -202,6 +203,10 @@ def _delivery(req, doc):
     """
     text = (req.get("text") or "").strip()
     names = set(n.lower() for n in _FILENAME.findall(text))
+    # An attachment's name is not a deliverable's. "Include only facts provided
+    # in facts_5.txt" was read as "deliver a file called facts_5.txt" and
+    # failed, every step, over a file that is not supposed to be there.
+    names -= {n.lower() for n in (exclude or ())}
     if len(names) != 1 or not _DELIVERS.search(text) or len(text.split()) > 14:
         return None
     want = names.pop()
@@ -289,6 +294,76 @@ def _reanchor(doc, evidence, rng):
     return out
 
 
+def _run_returns(params, targets, doc):
+    """Execute one example the brief states — `call` is a Python expression,
+    `expect` the literal it must evaluate to — against the Python file(s) in
+    scope, in a scratch copy, with a timeout.
+
+    The one thing no parser can answer is whether the program is RIGHT, and
+    for a brief that states a worked example the answer is a subprocess away.
+    Nothing in the app checked what a program returned before this: a run
+    finished with every chip green on a solve() that never returned, and on a
+    min_gelu that raised. It runs only where the agent's own shell runs —
+    executing the agent's code on this machine is the same exposure either
+    way, and where the shell is withheld this stays unverified.
+    """
+    import ast as _ast
+    import subprocess
+    import sys
+    import tempfile
+    from . import tools as _tools
+    if not _tools.shell_enabled():
+        return "unverified", "execution is switched off on this server", []
+    call = str(params.get("call") or "").strip()
+    expect_raw = params.get("expect")
+    try:
+        expect = _ast.literal_eval(str(expect_raw)) if isinstance(expect_raw, str) else expect_raw
+    except (ValueError, SyntaxError):
+        expect = str(expect_raw)
+    with tempfile.TemporaryDirectory() as tmp:
+        modules = []
+        for f in targets:
+            path = os.path.join(tmp, os.path.basename(f["file"]))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(doc["text"][f["start"]:f["end"]])
+            modules.append(os.path.splitext(os.path.basename(f["file"]))[0])
+        runner = (
+            "import sys, json, importlib\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "ns = {}\n"
+            "for m in sys.argv[2].split(','):\n"
+            "    mod = importlib.import_module(m)\n"
+            "    ns.update({k: v for k, v in vars(mod).items() if not k.startswith('__')})\n"
+            "    ns[m] = mod\n"
+            "result = eval(sys.argv[3], ns)\n"
+            "print('__RESULT__' + repr(result))\n")
+        try:
+            proc = subprocess.run(["python3", "-c", runner, tmp, ",".join(modules), call],
+                                  cwd=tmp, capture_output=True, text=True, timeout=15,
+                                  env={"PATH": os.environ.get("PATH", ""),
+                                       "PYTHONHASHSEED": "0"})
+        except subprocess.TimeoutExpired:
+            return "violated", f"{call} did not return within 15 seconds", []
+        out = proc.stdout
+        if "__RESULT__" not in out:
+            err = (proc.stderr or out).strip().splitlines()
+            tail = err[-1] if err else f"exit {proc.returncode}"
+            return "violated", f"{call} raised: {tail[:160]}", []
+        got_repr = out.rsplit("__RESULT__", 1)[1].strip()
+    try:
+        got = _ast.literal_eval(got_repr)
+    except (ValueError, SyntaxError):
+        got = got_repr
+    ok = got == expect
+    if not ok and isinstance(got, (int, float)) and isinstance(expect, (int, float)):
+        ok = abs(float(got) - float(expect)) <= 1e-6 * max(1.0, abs(float(expect)))
+    if not ok and isinstance(expect, str):
+        ok = str(got) == expect
+    if ok:
+        return "satisfied", f"{call} returns {got_repr[:80]}", []
+    return "violated", f"{call} returns {got_repr[:80]}, expected {expect_raw!r}", []
+
+
 def _check_code_prop(req, doc, scope_range):
     """Dispatch to the AST checker, per Python file the scope covers.
 
@@ -303,6 +378,9 @@ def _check_code_prop(req, doc, scope_range):
                and _PY_EXT.search(f["file"])]
     if not targets:
         return "unverified", "no Python file in scope yet", []
+    if str(params.get("prop") or "").strip().lower() == "returns":
+        verdict, detail, _ = _run_returns(params, targets, doc)
+        return verdict, f"[{targets[0]['file']}] {detail}", []
 
     verdicts, details, locs = [], [], []
     for f in targets:
@@ -412,7 +490,26 @@ def _check_table_prop(req, doc, scope_range, session):
     return verdict, f"[{target['file']}] {detail}" if detail else "", locs[:6]
 
 
-def _check_code(req, doc, scope_range):
+def mandated_names(reqs):
+    """Identifiers the brief itself demands, read off the other requirements:
+    the name in every `defines` and `initializes`, whichever way they are
+    verified. A naming-convention rule in the same brief is not applied to
+    these — "a function named min_gelu" and "function names in CamelCase"
+    cannot both be met otherwise, and CodeIF briefs state that pair often."""
+    out = set()
+    for r in reqs:
+        if r.get("status") != "active" or r.get("type") != "code-prop":
+            continue
+        p = r.get("params") or {}
+        if str(p.get("prop") or "").lower() in ("defines", "initializes"):
+            for key in ("name", "call"):
+                v = str(p.get(key) or "").strip()
+                if v.isidentifier():
+                    out.add(v)
+    return sorted(out)
+
+
+def _check_code(req, doc, scope_range, exempt=()):
     """Dispatch to the v3 checker. Adds `partial`, which v3 has no need for:
     a multi-phrase preserve requirement can be three-quarters kept, and
     collapsing that to 'violated' throws away the information the user needs."""
@@ -420,6 +517,9 @@ def _check_code(req, doc, scope_range):
     scope_text = doc["text"][start:end]
     rtype = req["type"]
     if rtype == "code-prop":
+        params = req.get("params") or {}
+        if exempt and str(params.get("prop") or "").lower() == "naming":
+            req = {**req, "params": {**params, "exempt": list(exempt)}}
         return _check_code_prop(req, doc, scope_range)
     shim = dict(req)
     if rtype == "preserve":
@@ -582,7 +682,26 @@ def judge(reqs, doc, task_brief="", reference=""):
                   "source of truth when a requirement relates the document to",
                   "it: rows or columns to keep, values to repair, data to stay",
                   "faithful to.",
-                  "---", reference, "---", ""]
+                  "---", reference, "---",
+                  # Where the judge went wrong on the biographies: it failed
+                  # "state nothing the source does not" over a date assembled
+                  # from a day, a month and a year the source gives separately,
+                  # and over connective prose ("the record shows a range of
+                  # settings"). Faithfulness is about claims of fact.
+                  "Reading the document against that material: a requirement to",
+                  "state only what the material states is met by paraphrase, by",
+                  "joining the fields of one fact (a day, a month and a year into",
+                  "one date), by naming a stated relation or role in ordinary",
+                  "words (\"spouse of\" as married to, \"job\" as worked as), by",
+                  "ordinary connective prose, and by leaving facts out; it is",
+                  "violated only by a claim of fact the material does not",
+                  "contain — quote that claim. A requirement to include every",
+                  "fact is violated only if you can name a fact in the material",
+                  "the document leaves out — name it. A requirement to keep a",
+                  "column's values as they are, apart from a stated repair, is",
+                  "violated only by a cell you can point to whose change is not",
+                  "that repair.",
+                  ""]
     lines += ["Document under review. Each file appears under a '=== file: NAME ==='",
               "header; the headers are metadata, not part of the text.",
               "---", _judge_view(doc), "---", "",
@@ -682,6 +801,9 @@ def verify(session, judge_pass=False, **kw):
     edits = [e for e in session.events
              if e.get("type") == "step" and (e.get("meta") or {}).get("kind") == "edit"
              and (e.get("meta") or {}).get("ok")]
+    exempt = mandated_names(session.requirements)
+    att = getattr(session, "attachments", None)
+    attachment_names = att.list() if att is not None else []
 
     for req in session.requirements:
         prev = req.get("report") or {}
@@ -698,7 +820,7 @@ def verify(session, judge_pass=False, **kw):
                             "confidence": None, "scopeHash": None})
             continue
 
-        deliver = _delivery(req, doc)
+        deliver = _delivery(req, doc, attachment_names)
         if deliver:
             verdict, detail, fname = deliver
             ev = []
@@ -728,7 +850,7 @@ def verify(session, judge_pass=False, **kw):
             verdict, detail, locs = _check_table_prop(req, doc, rng, session)
             evidence = _artifact_evidence(doc, locs)
         elif req.get("verify") == "code":
-            verdict, detail, evidence = _check_code(req, doc, rng)
+            verdict, detail, evidence = _check_code(req, doc, rng, exempt)
         elif req["id"] in judged:
             verdict, detail, quote, confidence = judged[req["id"]]
             evidence = _quote_evidence(doc, quote)

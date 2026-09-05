@@ -5,6 +5,7 @@ import React from 'react';
 import '@testing-library/jest-dom';   // no src/setupTests.js in this project
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import AgentApp, { hashForMode } from './AgentApp';
+import api from './api';
 
 const REQS = [
   {
@@ -710,13 +711,17 @@ test('the switcher builds a hash that keeps every other flag', () => {
   expect(hashForMode('#agent/s2', 'weighted')).toBe('#agent/s1');
   expect(hashForMode('', 'weighted')).toBe('#agent/s1');
   expect(hashForMode('#agent/review', 'baseline')).toBe('#agent/review/s2');
+  expect(hashForMode('#agent', 'insitu')).toBe('#agent/s3');
+  expect(hashForMode('#agent/s3', 'weighted')).toBe('#agent/s1');
+  // the participant token is not a setting: switching keeps it
+  expect(hashForMode('#agent/s1/p7', 'insitu')).toBe('#agent/p7/s3');
 });
 
 test('neither setting spells its condition out in the URL', () => {
-  const built = ['weighted', 'baseline'].flatMap((m) => [
+  const built = ['weighted', 'baseline', 'insitu'].flatMap((m) => [
     hashForMode('#agent', m), hashForMode('#agent/dev', m), hashForMode('', m),
   ]);
-  built.forEach((h) => expect(h).not.toMatch(/baseline|weighted/i));
+  built.forEach((h) => expect(h).not.toMatch(/baseline|weighted|insitu/i));
 });
 
 test('a bookmarked #agent/baseline still resolves to the control, renamed', () => {
@@ -755,8 +760,8 @@ test('the picker numbers the conditions and never names them', async () => {
   await startSession();
   await screen.findByText('Requirements');
   const opts = [...document.querySelectorAll('.setting option')];
-  expect(opts.map((o) => o.textContent)).toEqual(['Setting 1', 'Setting 2']);
-  expect(document.body.textContent).not.toMatch(/baseline/i);
+  expect(opts.map((o) => o.textContent)).toEqual(['Setting 1', 'Setting 2', 'Setting 3']);
+  expect(document.body.textContent).not.toMatch(/baseline|in-situ|insitu|weighted/i);
 });
 
 test('a baseline session shows the picker on setting 2, and the rail is still gone', async () => {
@@ -774,4 +779,180 @@ test('picking the other setting rewrites the hash and reloads into it', async ()
   fireEvent.change(document.querySelector('.setting select'), { target: { value: 'baseline' } });
   await waitFor(() => expect(window.location.hash).toBe('#agent/s2'));
   expect(window.location.reload).toHaveBeenCalled();
+});
+
+
+/* ---------------------------------------------------------------- in-situ
+
+   The second control: the baseline plus the two ways of acting on the text
+   without describing it. What the study depends on is that this screen has
+   exactly those two and nothing of the requirement layer — and that the chat
+   baseline, in turn, has neither. */
+
+const INSITU = { ...BASELINE, sessionId: 'i1', mode: 'insitu' };
+
+const WITHHELD_INSITU = ['/extract', '/commit', '/gate', '/requirement', '/recheck'];
+
+function mockInsitu() {
+  freshTab();
+  window.location.hash = '#agent/s3';
+  global.fetch = jest.fn((url) => {
+    if (WITHHELD_INSITU.some((p) => String(url).includes(p))) return withheld();
+    if (url.includes('/session')) return body({ ...INSITU, brief: '', stepCount: 0, events: [] });
+    if (url.includes('/step')) return body({ events: [], snapshot: INSITU, canContinue: false });
+    return body(INSITU);
+  });
+}
+
+async function startInsitu() {
+  mockInsitu();
+  render(<AgentApp />);
+  const composer = await screen.findByPlaceholderText(/Describe the task/);
+  fireEvent.change(composer, { target: { value: 'Write an application package.' } });
+  fireEvent.keyDown(composer, { key: 'Enter' });
+  return composer;
+}
+
+const fakeSelection = (node) => ({
+  isCollapsed: false,
+  rangeCount: 1,
+  anchorNode: node,
+  toString: () => 'cutting-edge',
+  getRangeAt: () => ({ getBoundingClientRect: () => ({ left: 10, top: 10, width: 40, height: 12 }) }),
+  removeAllRanges: () => {},
+});
+
+test('in-situ: the condition is asked for at the server as its own mode', async () => {
+  mockInsitu();
+  render(<AgentApp />);
+  await waitFor(() => {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/session'));
+    expect(call).toBeDefined();
+    expect(JSON.parse(call[1].body)).toMatchObject({ mode: 'insitu' });
+  });
+});
+
+test('in-situ: no requirement rail, two panes, and the screen says which setting it is', async () => {
+  await startInsitu();
+  expect(await screen.findByText('Workspace')).toBeInTheDocument();
+  expect(screen.queryByText('Requirements')).toBeNull();
+  expect(document.querySelector('.cols').getAttribute('data-panes')).toBe('2');
+  expect(document.querySelector('.wt4').getAttribute('data-mode')).toBe('insitu');
+  expect(document.querySelector('.setting select').value).toBe('insitu');
+});
+
+test('in-situ: selecting text offers replace and insert, never freeze, and the edit goes out as a steer', async () => {
+  await startInsitu();
+  await screen.findByText(/cover_letter\.md/);
+  const pre = document.querySelector('.filetext');
+  const realGetSelection = window.getSelection;
+  window.getSelection = () => fakeSelection(pre);
+  fireEvent.mouseUp(pre);
+
+  expect(await screen.findByText('Replace…')).toBeInTheDocument();
+  expect(screen.getByText('Insert after…')).toBeInTheDocument();
+  expect(screen.queryByText(/Freeze/)).toBeNull();
+
+  fireEvent.click(screen.getByText('Replace…'));
+  const box = await screen.findByPlaceholderText('how should it change?');
+  fireEvent.change(box, { target: { value: 'make it plainer' } });
+  fireEvent.keyDown(box, { key: 'Enter' });
+  await waitFor(() => {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/steer'));
+    expect(call).toBeDefined();
+    expect(JSON.parse(call[1].body).text).toMatch(/^Replace exactly this passage/);
+    expect(JSON.parse(call[1].body).text).toMatch(/cutting-edge/);
+  });
+  // nothing of the requirement layer was asked for along the way
+  expect(global.fetch.mock.calls.some((c) => WITHHELD_INSITU.some(
+    (r) => String(c[0]).includes(r)))).toBe(false);
+  expect(document.querySelector('.err')).toBeNull();
+  window.getSelection = realGetSelection;
+});
+
+test('in-situ: the document can be typed into', async () => {
+  await startInsitu();
+  await screen.findByText(/cover_letter\.md/);
+  expect(document.querySelector('.filetext').getAttribute('contenteditable')).toBe('true');
+});
+
+test('baseline: the document is read-only', async () => {
+  await startBaseline();
+  await screen.findByText(/cover_letter\.md/);
+  expect(document.querySelector('.filetext').getAttribute('contenteditable')).toBe('false');
+});
+
+/* ------------------------------------------------------ the study record
+
+   Who did which task in which setting has to be in session.json, not in a
+   spreadsheet beside it. The participant rides the URL the experimenter
+   opens; the task is logged the moment it is picked. */
+
+test('the participant token in the hash reaches the server and survives normalization', async () => {
+  freshTab();
+  window.location.hash = '#agent/s1/p7';
+  render(<AgentApp />);
+  await waitFor(() => {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/session'));
+    expect(call).toBeDefined();
+    expect(JSON.parse(call[1].body)).toMatchObject({ mode: 'weighted', participant: 'P7' });
+  });
+  expect(window.location.hash).toBe('#agent/p7/s1');
+});
+
+test('selecting a requirement is logged with where the click came from', async () => {
+  freshTab();
+  await startSession();
+  const row = await screen.findByText('Cover letter is 350-500 words');
+  fireEvent.click(row);
+  await waitFor(() => {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/telemetry')
+      && JSON.parse(c[1].body).action === 'select-req');
+    expect(call).toBeDefined();
+    expect(JSON.parse(call[1].body).payload).toEqual({ id: 'R1', source: 'rail' });
+  });
+});
+
+/* ---------------------------------------------------------------- hand in
+
+   The protocol ends a task when the participant hands the work in. It takes
+   two clicks, it reaches the server, and afterwards the screen is closed:
+   nothing can be typed, and the workspace no longer takes edits. */
+
+const STARTED = { ...RUNNING, startedAt: 1000, now: 1042 };
+const HANDED_IN = { ...STARTED, submitted: 1100, status: 'done' };
+
+test('hand in: two clicks, one request, and the composer closes', async () => {
+  freshTab();
+  global.fetch = jest.fn((url) => {
+    if (url.includes('/session')) return body(EMPTY);
+    if (url.includes('/submit')) return body(HANDED_IN);
+    if (url.includes('/step')) return body({ events: [], snapshot: STARTED, canContinue: false });
+    return body(STARTED);
+  });
+  await startSession();
+  const btn = await screen.findByText('Hand in');
+  // the clock is on the same row, counting from the server's clock
+  expect(document.querySelector('.clock').textContent).toMatch(/^00:4\d$/);
+  fireEvent.click(btn);
+  expect(screen.getByText(/click again to confirm/)).toBeInTheDocument();
+  expect(global.fetch.mock.calls.some((c) => String(c[0]).includes('/submit'))).toBe(false);
+  fireEvent.click(screen.getByText(/click again to confirm/));
+  await waitFor(() => {
+    const call = global.fetch.mock.calls.find((c) => String(c[0]).includes('/submit'));
+    expect(call).toBeDefined();
+    expect(JSON.parse(call[1].body)).toMatchObject({ reason: 'user' });
+  });
+  expect(await screen.findByText('handed in')).toBeInTheDocument();
+  expect(screen.getByPlaceholderText(/handed in/)).toBeDisabled();
+  expect(screen.queryByText('Hand in')).toBeNull();
+  expect(document.querySelector('.filetext').getAttribute('contenteditable')).toBe('false');
+});
+
+test('api: the submit route carries the reason and the client clock', async () => {
+  global.fetch = jest.fn(() => body({ ok: true }));
+  await api.submit('s1', 'hard-stop', 720.4);
+  const call = global.fetch.mock.calls[0];
+  expect(String(call[0])).toMatch(/\/submit$/);
+  expect(JSON.parse(call[1].body)).toEqual({ sessionId: 's1', reason: 'hard-stop', elapsed: 720.4 });
 });

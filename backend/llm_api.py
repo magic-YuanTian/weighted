@@ -36,6 +36,32 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env
 
 MODEL = os.environ.get("WEIGHTTEXT_MODEL", "gpt-5.6-luna")
 
+# The AGENT — the model that plans and acts in the workspace — can be run on
+# a different model from the extractor and the judge, whose verdicts the
+# participant is asked to trust. By default it is the same model. gpt-5-nano
+# was tried here on 2026-09-04 as a weaker agent (it needs reasoning_effort
+# "low" to use its tools at all, never fills `targets`, and replies instead
+# of acting about one turn in four); the trial was stopped and the default
+# put back while the study design is reconsidered. Set WEIGHTTEXT_AGENT_MODEL
+# to try it again.
+AGENT_MODEL = os.environ.get("WEIGHTTEXT_AGENT_MODEL", MODEL)
+
+
+def lowest_effort(model):
+    """The least reasoning a model can be run at HERE. gpt-5.6 takes "none".
+    The gpt-5 family (gpt-5, gpt-5-mini, gpt-5-nano) rejects "none" and
+    accepts "minimal", but at "minimal" gpt-5-nano does not use its tools: on
+    the agent's first turn over a real brief it pasted the whole file into
+    the chat instead of calling write_file, four times in four, which ends the
+    run with nothing on disk. At "low" it called write_file three times in
+    three, with the one-sentence "why" the prompt asks for; at "medium" it
+    came back with neither a call nor a word. So "low" is the floor for that
+    family, measured rather than nominal."""
+    name = (model or "").lower()
+    if name.startswith("gpt-5-") or name in ("gpt-5", "gpt-5-chat"):
+        return "low"
+    return "none"
+
 
 class _Completions:
     """Translates the call shape above into what this model actually accepts.
@@ -47,9 +73,10 @@ class _Completions:
       * ``temperature`` accepts only its default, so it is dropped -- callers
         asking for 0 do not get deterministic sampling from this model;
       * every call runs at ``reasoning_effort`` from WEIGHTTEXT_REASONING,
-        default "none" -- the study pins the lowest effort everywhere. Calls
-        WITH tools are forced to "none" regardless: this model rejects
-        function tools at any other effort.
+        default the lowest the model accepts (lowest_effort) -- the study
+        pins the lowest effort everywhere. Calls WITH tools are forced to
+        that floor regardless: gpt-5.6-luna rejects function tools at any
+        other effort, and gpt-5-nano does not know "none" at all.
 
     The callers are left alone -- this module is the documented adaptation
     point -- so the translation happens here. Lifting the third restriction
@@ -63,12 +90,12 @@ class _Completions:
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         kwargs.pop("temperature", None)  # only the default (1) is supported
+        floor = lowest_effort(kwargs.get("model"))
         if kwargs.get("tools"):
-            kwargs["reasoning_effort"] = "none"
+            kwargs["reasoning_effort"] = floor
         else:
-            kwargs.setdefault(
-                "reasoning_effort",
-                os.environ.get("WEIGHTTEXT_REASONING", "none"))
+            kwargs.setdefault("reasoning_effort",
+                              os.environ.get("WEIGHTTEXT_REASONING", floor))
         return self._inner.create(**kwargs)
 
 

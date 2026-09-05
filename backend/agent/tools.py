@@ -208,16 +208,51 @@ _BASELINE_DESCRIPTIONS = {
 }
 
 
+# The tools that can change a file. In the weighted condition each of them
+# takes `targets`: the ids of the requirements the change is aimed at. That is
+# what lets the loop count ATTEMPTS per requirement — three edits aimed at one
+# requirement that leave it red pause the run — instead of counting every edit
+# to the file, which paused runs over requirements the agent had not started
+# on. The agent's one-sentence "why" never names an id (0 of 171 edits in the
+# screen that found this out), so the attribution has to be a field.
+EDIT_TOOLS = ("write_file", "edit_file", "insert_file", "run_command")
+
+_TARGETS_PARAM = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": ("REQUIRED. The ids of the requirements this change is aimed "
+                    "at — the ones you expect it to settle, e.g. [\"R3\", \"R7\"]. "
+                    "Name the ones you are working on, not every requirement the "
+                    "file has to meet. Only a change aimed at no requirement at "
+                    "all — copying the source, a scaffold — may pass []. Leaving "
+                    "it empty while a requirement is red counts the change "
+                    "against every red requirement."),
+}
+
+
+def _with_targets(tools):
+    out = []
+    for t in tools:
+        if t["function"]["name"] in EDIT_TOOLS:
+            t = copy.deepcopy(t)
+            params = t["function"]["parameters"]
+            params["properties"]["targets"] = _TARGETS_PARAM
+            params["required"] = list(params.get("required") or []) + ["targets"]
+        out.append(t)
+    return out
+
+
 def schemas(mode="weighted"):
     """The tools offered for the next action. A disabled shell is withheld
     rather than offered and refused — a tool the model can see is a tool it
     plans around, and it should not plan around one that never works. The
-    baseline condition loses run_check for the same reason."""
+    control conditions lose run_check for the same reason, and never see
+    `targets`: they have no requirement ids to name."""
     out = TOOL_SCHEMAS
     if not shell_enabled():
         out = [t for t in out if t["function"]["name"] != "run_command"]
-    if mode != "baseline":
-        return out
+    if mode == "weighted":
+        return _with_targets(out)
     baseline = []
     for t in out:
         name = t["function"]["name"]
@@ -547,12 +582,39 @@ def _run_command(session, command):
     return "\n".join(lines), meta
 
 
+def targets_of(session, args):
+    """The requirement ids a change names in `targets`, normalised to the ids
+    the rail uses. Unknown ids are dropped rather than counted: an attempt at
+    a requirement that does not exist is not an attempt at anything."""
+    raw = args.get("targets")
+    if isinstance(raw, str):
+        raw = re.split(r"[\s,;]+", raw)
+    if not isinstance(raw, (list, tuple)):
+        return []
+    known = {r["id"].upper(): r["id"] for r in session.requirements
+             if r.get("status") == "active"}
+    out = []
+    for x in raw:
+        rid = known.get(str(x).strip().upper())
+        if rid and rid not in out:
+            out.append(rid)
+    return out
+
+
 def execute(session, name, args):
     """Run one tool call. Returns (observation_text, meta).
 
     meta carries what the UI needs to render the step: {ok, path, add, del,
-    kind, blocked}. `finish` never completes here — the loop owns the gate.
+    kind, blocked, targets}. `finish` never completes here — the loop owns the
+    gate.
     """
+    observation, meta = _execute(session, name, args)
+    if name in EDIT_TOOLS and session.verified:
+        meta = {**meta, "targets": targets_of(session, args)}
+    return observation, meta
+
+
+def _execute(session, name, args):
     ws = session.workspace
     try:
         if name == "list_files":
@@ -679,11 +741,11 @@ def execute(session, name, args):
             return _run_command(session, command)
 
         if name == "run_check":
-            # Not offered in the baseline condition, so reaching here means a
+            # Not offered in the control conditions, so reaching here means a
             # model invented the call. Saying so beats running a checker over
             # an empty requirement list and reporting that all zero of them
             # pass, which reads to the agent as a clean bill of health.
-            if session.mode == "baseline":
+            if not session.verified:
                 return ("there is no run_check tool in this workspace",
                         {"ok": False, "kind": "error"})
             from . import verifier

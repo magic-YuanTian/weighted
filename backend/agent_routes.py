@@ -14,6 +14,7 @@ from flask import Blueprint, jsonify, request
 
 from agent import extract as extract_mod
 from agent import loop
+from agent import replay
 from agent import requirements as R
 from agent import session as sessions
 from agent import verifier
@@ -30,7 +31,8 @@ def _session(required=True):
 
 
 class Withheld(Exception):
-    """A treatment-only route called against a baseline session."""
+    """A route called against a session whose condition does not carry it, or
+    against a task that has already been handed in."""
 
 
 def _fail(e, code=500):
@@ -43,15 +45,39 @@ def _fail(e, code=500):
     return jsonify({"error": f"{type(e).__name__}: {e}"}), code
 
 
-def _weighted_only(s):
+def _verified_only(s):
     """The requirement machinery is the manipulation. A stray client — a stale
     tab, a hash typed by hand, a bug in the picker — must not be able to hand
-    half of it to a baseline participant, so the routes that carry it refuse
+    half of it to a control participant, so the routes that carry it refuse
     rather than quietly doing nothing. Refusing is loud in the console and
     visible in the logs; a silent no-op would look like a working screen."""
-    if s.mode == "baseline":
-        raise Withheld("this session is a baseline run: "
-                       "requirements, steering and the gate are not part of it")
+    if not s.verified:
+        raise Withheld(f"this session is {_condition_name(s)}: "
+                       "requirements, highlighting, freezing and the gate are "
+                       "not part of it")
+    return s
+
+
+def _steerable_only(s):
+    """Anchored replace/insert and direct editing: in-situ and weighted, never
+    the chat baseline, whose one channel to the agent is the message box."""
+    if not s.steerable:
+        raise Withheld(f"this session is {_condition_name(s)}: the workspace is "
+                       "read-only and the agent is steered by message only")
+    return s
+
+
+def _condition_name(s):
+    return {"baseline": "a baseline run", "insitu": "an in-situ run"}.get(
+        s.mode, f"a {s.mode} run")
+
+
+def _open(s):
+    """A task that has been handed in is closed to everyone, the agent
+    included: the files at that moment are what gets graded, and a step or an
+    edit after it would grade something else."""
+    if s.submitted:
+        raise Withheld("this task has been handed in; nothing more can change it")
     return s
 
 
@@ -96,7 +122,13 @@ def presets():
                     text = fh.read()
                 att.append({"name": name, "chars": len(text),
                             "lines": text.count("\n") + 1})
-            out.append({**t, "brief": brief, "attachments": att})
+            # a recorded pre-run, if one exists for this task: the weighted
+            # picker replays it instead of typing the brief
+            tm = replay.trace_meta(t["id"])
+            out.append({**t, "brief": brief, "attachments": att,
+                        "trace": bool(tm),
+                        "traceSteps": (tm or {}).get("steps"),
+                        "traceStatus": (tm or {}).get("status")})
         return jsonify({"tasks": sorted(out, key=lambda t: t.get("n", 0))})
     except Exception as e:                                    # noqa: BLE001
         return _fail(e)
@@ -159,7 +191,8 @@ def create_session():
         # "weighted", and the mode it settled on comes straight back in the
         # snapshot so the client can render what it actually got.
         s = sessions.create((data.get("brief") or "").strip(),
-                            mode=(data.get("mode") or "weighted"))
+                            mode=(data.get("mode") or "weighted"),
+                            participant=(data.get("participant") or "").strip() or None)
         return jsonify(s.snapshot())
     except Exception as e:                                    # noqa: BLE001
         return _fail(e)
@@ -188,6 +221,7 @@ def export():
         return jsonify({"error": "unknown sessionId"}), 404
     snap = s.snapshot()
     snap["llmMessages"] = s.llm_messages
+    snap["replay"] = s.replay
     return jsonify(snap)
 
 
@@ -200,7 +234,7 @@ def extract():
         brief = (data.get("brief") or "").strip()
         s = sessions.get(data.get("sessionId"))
         if s is not None:
-            _weighted_only(s)
+            _verified_only(s)
             if brief:
                 s.brief = brief
         result = extract_mod.extract(brief or (s.brief if s else ""))
@@ -234,6 +268,7 @@ def answer():
             updated = extract_mod.apply_answer(req, question, ans)
         s = sessions.get(data.get("sessionId"))
         if s is not None:
+            replay.divert(s, "answer")
             # A question answered mid-run has to land in the live store, or the
             # answer changes nothing and the user has been asked for nothing.
             updated["report"] = next((r.get("report") for r in s.requirements
@@ -257,7 +292,7 @@ def commit():
     agent until this happens."""
     try:
         s, data = _session()
-        _weighted_only(s)
+        _verified_only(s)
         s.requirements = R.normalize_all(data.get("requirements"))
         s.questions = data.get("questions") or s.questions
         if data.get("brief"):
@@ -284,17 +319,30 @@ def message():
     first turn there so the list is read before it is measured against."""
     try:
         s, data = _session()
+        _open(s)
         text = (data.get("text") or "").strip()
         if not text:
             return jsonify({"error": "empty message"}), 400
+        if s.requirements:
+            # a message into a run that is still replaying its pre-run hands
+            # the run to the live agent here (no-op otherwise)
+            replay.divert(s, "message")
         s.llm_messages.append({"role": "user", "content": text})
         s.status = "idle"
         s.log("user", text=text, highlights=data.get("highlights") or [])
 
-        if s.mode == "baseline":
+        if not s.verified:
             # No extraction: the brief goes to the agent as the user typed it,
             # and the rail it would have filled is not on the screen.
             s.brief = s.brief or text
+        elif not s.requirements and replay.match(text):
+            # The brief of a recorded pre-run: the list comes back as it was
+            # extracted then, and the steps will follow one at a time. See
+            # agent/replay.py.
+            s.brief = s.brief or text
+            task, t = replay.match(text)
+            replay.arm(s, task, t)
+            replay.first_message(s, t)
         elif not s.requirements:
             s.brief = s.brief or text
             result = extract_mod.extract(text)
@@ -330,6 +378,7 @@ def step():
     """One unit of agent work: one planned action and its result."""
     try:
         s, _ = _session()
+        _open(s)
         lock = _turn_lock(s.id)
         if not lock.acquire(blocking=False):
             # A step is already in flight (a retry after a dropped connection,
@@ -337,13 +386,19 @@ def step():
             return jsonify({"events": [], "snapshot": s.snapshot(),
                             "canContinue": True, "busy": True})
         try:
-            events = loop.step(s)
+            events = replay.step(s) if replay.active(s) else loop.step(s)
             kinds = {e["type"] for e in events}
             # The auto-runner stops on anything that wants a human: a paused
             # loop, a finished task, an error, or the agent replying instead
             # of acting.
             can_continue = (s.status not in ("done", "paused")
-                            and not (kinds & {"assistant", "error"}))
+                            and not (kinds & {"assistant", "error"})
+                            # the recorded pre-run ran out on this turn: the
+                            # runner stops here and the participant starts the
+                            # live agent (agent/replay.py)
+                            and not any(e.get("type") == "trace"
+                                        and e.get("kind") == "replay-end"
+                                        for e in events))
         finally:
             lock.release()
         return jsonify({"events": events, "snapshot": s.snapshot(),
@@ -371,6 +426,10 @@ def pause():
         proc = getattr(s, "_proc", None)
         if proc is not None and proc.poll() is None:
             proc.kill()
+        # The counterpart of `resume`, which the loop logs when the run picks
+        # up again. Without this line a pause is visible in the log only as a
+        # gap between steps, and a gap is not an action anyone can count.
+        s.log("pause", status=s.status, step=s.step_count)
         s.save()
         snap = s.snapshot()
         snap["canContinue"] = _can_continue(s)
@@ -389,6 +448,9 @@ def write_file():
     agent is told, so it re-reads instead of acting on a stale copy."""
     try:
         s, data = _session()
+        _steerable_only(s)
+        _open(s)
+        replay.divert(s, "edit")
         path = (data.get("path") or "").strip()
         text = data.get("text")
         if not path or text is None:
@@ -422,7 +484,9 @@ def steer():
     """A one-shot instruction injected at the head of the next step."""
     try:
         s, data = _session()
-        _weighted_only(s)
+        _steerable_only(s)
+        _open(s)
+        replay.divert(s, "steer")
         text = (data.get("text") or "").strip()
         if not text:
             return jsonify({"error": "empty steer"}), 400
@@ -442,7 +506,8 @@ def steer():
 def gate():
     try:
         s, data = _session()
-        _weighted_only(s)
+        _verified_only(s)
+        replay.divert(s, "gate")
         s.gate_on = bool(data.get("on", not s.gate_on))
         s.log("gate-toggle", on=s.gate_on,
               blocking=[r["id"] for r in R.blocking(s.requirements)])
@@ -462,7 +527,9 @@ def requirement():
     of them logged, because how people manage the store is the study data."""
     try:
         s, data = _session()
-        _weighted_only(s)
+        _verified_only(s)
+        _open(s)
+        replay.divert(s, "requirement")
         action = data.get("action")
         rid = data.get("id")
         target = next((r for r in s.requirements if r["id"] == rid), None)
@@ -535,7 +602,11 @@ def recheck():
     """Re-verify now. `judge: true` spends one LLM call on the Tier-2 ones."""
     try:
         s, data = _session()
-        _weighted_only(s)
+        _verified_only(s)
+        if replay.armed(s):
+            # during a replay the rail reads what was recorded, judge included
+            replay.recheck(s, judge=bool(data.get("judge")))
+            return jsonify(s.snapshot())
         before = {r["id"]: (r.get("report") or {}).get("verdict")
                   for r in s.requirements}
         reports = verifier.verify(s, judge_pass=bool(data.get("judge")))
@@ -558,6 +629,37 @@ def recheck():
         return _fail(e)
 
 
+@bp.route("/submit", methods=["POST"])
+def submit():
+    """The participant hands the work in — or the hard stop does it for them.
+    The files as they stand are copied into the event, because that is what
+    gets graded, and the session closes: no further step, message, edit or
+    steer is accepted. `reason` is "user" or "hard-stop"; `elapsed` is the
+    client's clock, kept beside the server's timestamps for the record."""
+    try:
+        s, data = _session()
+        if s.submitted:
+            return jsonify(s.snapshot())
+        runRefKill = getattr(s, "_proc", None)
+        if runRefKill is not None and runRefKill.poll() is None:
+            runRefKill.kill()
+        s.submitted = __import__("time").time()
+        s.status = "done"
+        started = s.started_at()
+        s.log("submit", reason=(data.get("reason") or "user"),
+              elapsed=(s.submitted - started) if started else None,
+              clientElapsed=data.get("elapsed"),
+              step=s.step_count,
+              counts=R.counts(s.requirements) if s.verified else None,
+              files={f: s.workspace.read(f) for f in s.workspace.list()})
+        s.save()
+        return jsonify(s.snapshot())
+    except LookupError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:                                    # noqa: BLE001
+        return _fail(e)
+
+
 @bp.route("/context", methods=["GET"])
 def context():
     s = sessions.get(request.args.get("sessionId"))
@@ -569,10 +671,18 @@ def context():
 @bp.route("/telemetry", methods=["POST"])
 def telemetry():
     """Evidence clicks, jumps, dwell — the rail interactions that make the UI
-    an instrument as well as a tool."""
+    an instrument as well as a tool. Saved on every call: a click after the
+    agent's last step is exactly the kind of event the analysis wants, and
+    without the save it would live only in memory until the next step, which
+    may never come."""
     try:
         s, data = _session()
-        s.log("ui", action=data.get("action"), payload=data.get("payload"))
+        action = data.get("action")
+        payload = data.get("payload") or {}
+        if action == "task-pick" and isinstance(payload, dict):
+            s.study["task"] = payload.get("id") or None
+        s.log("ui", action=action, payload=payload)
+        s.save()
         return jsonify({"ok": True})
     except LookupError as e:
         return jsonify({"error": str(e)}), 404

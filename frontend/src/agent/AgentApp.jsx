@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from './api';
 import BriefStage from './BriefStage';
 import ReviewStage from './ReviewStage';
@@ -14,10 +14,19 @@ const MAX_AUTO_STEPS = 24;
      #agent/s1     setting 1 — the weighted condition: the brief becomes a
                    requirement list, every step is verified, the gate holds
                    finish
-     #agent/s2     setting 2 — the control: the same model, the same tools and
-                   this same screen, with the requirement rail, the verifier
-                   and the gate removed. The backend enforces it — the token
-                   only decides what is asked for and what is drawn
+     #agent/s2     setting 2 — the chat baseline: the same model, the same
+                   tools and this same screen, with the requirement rail, the
+                   verifier and the gate removed, and the workspace read-only.
+                   The one way to reach the agent is the message box
+     #agent/s3     setting 3 — in-situ: the baseline plus the two ways of
+                   acting on the text without describing it — select a passage
+                   for an anchored replace/insert, or type into the file. No
+                   rail, no verdicts, no freeze. The backend enforces all three
+                   — the token only decides what is asked for and what is
+                   drawn
+     #agent/p7     the participant's id, for the study log. Not a setting:
+                   switching settings keeps it, and the server writes it into
+                   the session so a run can be joined to a questionnaire row
      #agent/review the staged flow (brief -> requirement review -> run), kept
                    because "did an explicit review screen help?" is an
                    experimental condition, not a settled question
@@ -28,18 +37,23 @@ const MAX_AUTO_STEPS = 24;
    to the study's own question in the address bar, above a screen built not to
    give it away. Numbering the tokens is not decoration: it is the same blind
    the picker keeps, held one level up. */
-const MODE_TOKEN = { weighted: 's1', baseline: 's2' };
+const MODE_TOKEN = { weighted: 's1', baseline: 's2', insitu: 's3' };
 // What a hash part means. `baseline` is the old spelling, still read so that a
 // bookmarked link resolves to the condition it was saved for — a link that
 // silently ran the other one would be worse than a broken link. It is never
 // written back: normalizeHash rewrites it on arrival.
-const TOKEN_MODE = { s1: 'weighted', s2: 'baseline', baseline: 'baseline' };
+const TOKEN_MODE = { s1: 'weighted', s2: 'baseline', s3: 'insitu', baseline: 'baseline' };
 
 // Exact parts, not a substring of the whole hash: `s1` and `s2` are short
 // enough that `includes` would start matching things that are not flags.
 const hashParts = (hash) => String(hash || '').replace(/^#/, '').split('/').filter(Boolean);
 
 export const DEV = () => hashParts(window.location.hash).includes('dev');
+// `p7` -> "P7". Anything else in the hash is not a participant.
+export const PARTICIPANT = () => {
+  const p = hashParts(window.location.hash).find((x) => /^p\d+$/i.test(x));
+  return p ? p.toUpperCase() : null;
+};
 const WANTED_MODE = () => {
   const found = hashParts(window.location.hash).map((p) => TOKEN_MODE[p]).find(Boolean);
   return found || 'weighted';
@@ -70,7 +84,7 @@ function normalizeHash() {
 // The staged flow is a requirement review, so there is nothing for it to show
 // in the control — and its first request would be refused. Setting 2 wins.
 const REVIEW_FLOW = () => hashParts(window.location.hash).includes('review')
-  && WANTED_MODE() !== 'baseline';
+  && WANTED_MODE() === 'weighted';
 
 export default function AgentApp() {
   const [stage, setStage] = useState(REVIEW_FLOW() ? 'brief' : 'run');
@@ -157,7 +171,7 @@ export default function AgentApp() {
           }
         } catch (e) { /* stale or unknown id — start fresh */ }
       }
-      const s = await api.createSession('', WANTED_MODE());
+      const s = await api.createSession('', WANTED_MODE(), PARTICIPANT());
       setSessionId(s.sessionId);
       setSnap(s);
       try { window.sessionStorage.setItem(key, s.sessionId); } catch (e) {}
@@ -261,14 +275,14 @@ export default function AgentApp() {
       // — but leaving them "unverified" forever would be a rail full of
       // question marks. The moment the agent stops is when it is worth paying.
       //
-      // There is nothing to re-verify in the control condition, and /recheck
-      // refuses it (409) rather than quietly doing nothing — so asking anyway
+      // There is nothing to re-verify in the control conditions, and /recheck
+      // refuses them (409) rather than quietly doing nothing — so asking anyway
       // ended every baseline run by dropping "this session is a baseline run"
       // into the error banner, right where the participant was reading the
       // agent's last step. The mode comes from the server's snapshot, which is
       // the same thing every other branch on this screen trusts.
       const s = snapRef.current;
-      if (!s || (s.mode || 'weighted') !== 'baseline') {
+      if (!s || (s.mode || 'weighted') === 'weighted') {
         setSnap(await api.recheck(sessionId, true));
       }
     } catch (e) { fail(e); } finally {
@@ -434,6 +448,69 @@ export default function AgentApp() {
     api.telemetry(sessionId, 'evidence-jump', target);
   }, [sessionId]);
 
+  /* Selecting a requirement is the one rail interaction that used to leave no
+     trace: a click on a chip in the chat, on a marked span in the workspace
+     or on a row in the rail all landed in setSelected and nowhere else. Each
+     surface gets its own setter so the log says where the click came from. */
+  const selectFrom = useMemo(() => {
+    const make = (source) => (id) => {
+      setSelected(id);
+      if (id && sessionId) api.telemetry(sessionId, 'select-req', { id, source });
+    };
+    return { chat: make('chat'), workspace: make('workspace'), rail: make('rail') };
+  }, [sessionId]);
+
+  // "Start the agent" and "continue" are the participant's, and the log
+  // should show them as such; every other call into doRun follows a message
+  // or a steer that is already logged.
+  const runClick = useCallback(() => {
+    api.telemetry(sessionId, 'run-click', { step: snapRef.current ? snapRef.current.stepCount : 0 });
+    return doRun();
+  }, [sessionId, doRun]);
+
+  /* The task clock. It starts at the first message and is the server's: the
+     snapshot carries when the task started and what time the server thinks it
+     is, so a session restored into a second tab reads the same clock, and a
+     laptop whose clock is wrong does not measure a different task. Between
+     snapshots the client counts on from the last one it received. */
+  const [, setTick] = useState(0);
+  // Derived in render, not in an effect: the clock and the hand-in button
+  // have to be on the screen in the same paint as the snapshot that started
+  // the task, not one tick later.
+  const anchor = useMemo(() => (snap && snap.startedAt && snap.now
+    ? { base: snap.now - snap.startedAt, at: Date.now() } : null), [snap]);
+  const anchorRef = useRef(null);
+  anchorRef.current = anchor;
+  const closed = !!(snap && snap.submitted);
+  const started = !!(snap && snap.startedAt);
+  useEffect(() => {
+    if (!started || closed) return undefined;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [started, closed]);
+  const liveElapsed = () => (anchorRef.current
+    ? anchorRef.current.base + (Date.now() - anchorRef.current.at) / 1000 : null);
+  const elapsed = closed ? snap.submitted - snap.startedAt : liveElapsed();
+
+  /* Handing in ends the task: the files as they stand are what gets graded,
+     and the server refuses every change after it. The hard stop hands in the
+     same way, once, when the limit the server announced has passed. */
+  const submit = useCallback(async (reason) => {
+    runRef.current = false;
+    setRunning(false);
+    setBusy('handing in');
+    try {
+      setSnap(await api.submit(sessionId, reason, liveElapsed()));
+    } catch (e) { fail(e); } finally { setBusy(''); }
+  }, [sessionId, setSnap]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const hard = snap && snap.limits && snap.limits.hard;
+  const autoRef = useRef(false);
+  useEffect(() => {
+    if (!hard || closed || elapsed === null || elapsed < hard || autoRef.current) return;
+    autoRef.current = true;
+    submit('hard-stop');
+  });
+
   const openContext = useCallback(async () => {
     try { setCtx(await api.context(sessionId)); } catch (e) { fail(e); }
   }, [sessionId]);
@@ -502,11 +579,16 @@ export default function AgentApp() {
 
   /* ------------------------------------------------------------ the screen */
   /* The server's answer, not the URL: a session restored into this tab carries
-     the condition it was created in, and that is what the screen must match. */
-  const baseline = (snap ? snap.mode : WANTED_MODE()) === 'baseline';
+     the condition it was created in, and that is what the screen must match.
+     Two questions decide what is drawn, the same two the server asks of a
+     session (verified, steerable): is there a requirement layer, and does the
+     workspace answer to the user. */
+  const mode = (snap && snap.mode) || WANTED_MODE();
+  const verified = mode === 'weighted';
+  const steerable = mode !== 'baseline';
 
   return (
-    <div className="wt4" data-mode={baseline ? 'baseline' : 'weighted'}>
+    <div className="wt4" data-mode={mode}>
       {/* No title bar. Everything it held was either redundant (a status word
           next to a spinner), or a control nobody could explain to themselves
           (the finish gate) — that one now introduces itself in the stream, in
@@ -520,7 +602,7 @@ export default function AgentApp() {
           onRun={doRun}
           onPause={pause}
           onStep={doStep}
-          onGate={baseline ? null : toggleGate}
+          onGate={verified ? toggleGate : null}
           onContext={openContext}
           onExport={() => window.open(api.exportUrl(sessionId), '_blank')}
         />
@@ -532,40 +614,47 @@ export default function AgentApp() {
         </div>
       )}
       {net && !error && <div className="net">{net}</div>}
-      <div className="cols" data-panes={baseline ? 2 : 3}>
+      <div className="cols" data-panes={verified ? 3 : 2}>
         <RunStream
           snap={snap}
-          mode={baseline ? 'baseline' : 'weighted'}
+          mode={mode}
           onSwitchMode={switchMode}
           focus={focus}
           running={running}
           pending={live}
           busy={busy}
           outbox={outbox}
-          onRun={doRun}
+          onRun={runClick}
           onPause={pause}
           onSend={send}
           onAnswer={answerQuestion}
           selected={selected}
-          onSelectReq={setSelected}
+          onSelectReq={selectFrom.chat}
           onJump={jump}
+          clock={elapsed}
+          closed={closed}
+          onHandIn={() => submit('user')}
         />
         <Workspace
           snap={snap}
           selected={selected}
           focus={focus}
-          onSelectReq={setSelected}
-          /* Freeze and anchored edits are steering. Without them the selection
-             toolbar has nothing to offer, and Workspace draws no toolbar. */
-          onFreeze={baseline ? null : freeze}
-          onAnchor={baseline ? null : anchoredEdit}
-          onSave={saveFile}
+          onSelectReq={selectFrom.workspace}
+          /* Freeze is a requirement, so it belongs to the weighted condition
+             alone; anchored edits and typing into the file belong to both
+             steerable conditions. Without any of them the selection toolbar
+             has nothing to offer and Workspace draws no toolbar; without
+             onSave the document is read-only. A task that has been handed in
+             is read-only everywhere. */
+          onFreeze={verified && !closed ? freeze : null}
+          onAnchor={steerable && !closed ? anchoredEdit : null}
+          onSave={steerable && !closed ? saveFile : null}
         />
-        {!baseline && (
+        {verified && (
           <RequirementRail
             snap={snap}
             selected={selected}
-            setSelected={setSelected}
+            setSelected={selectFrom.rail}
             onJump={jump}
             onAction={requirementAction}
             busy={busy}

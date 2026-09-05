@@ -14,21 +14,27 @@ from . import requirements as R
 from . import tools
 from . import verifier
 
-# The agent's standing instructions, in two conditions.
+# The agent's standing instructions, in two compositions for three conditions.
 #
-# The study compares WeightText against a baseline that is the same model, the
-# same tools and the same screen with the requirement machinery removed — so
-# the prompt has to differ by exactly that machinery and nothing else. The
+# The study compares WeightText against two controls that are the same model,
+# the same tools and the same screen with the requirement machinery removed —
+# so the prompt has to differ by exactly that machinery and nothing else. The
 # pieces below are composed twice rather than written out twice: a rule about
 # how to use edit_file is shared verbatim, and only the rules that talk about
 # checking, verdicts and requirements have a second version. What is NOT
-# withheld from the baseline is tool advice — copy the source before repairing
-# it, one repair per command — because a baseline that is badly prompted
+# withheld from the controls is tool advice — copy the source before repairing
+# it, one repair per command — because a control that is badly prompted
 # measures prompt engineering, not the interface.
 #
-# The weighted composition below is byte-identical to the single SYSTEM string
-# that preceded the split, so every run measured before this change was
-# measured under the same prompt this one sends.
+# The in-situ condition gets the baseline's composition: what it adds over the
+# chat baseline (anchored replace/insert, typing into the file) is a way for
+# the user to reach the agent, and it arrives as ordinary user messages and
+# hand edits the agent is told about — nothing in the standing instructions
+# has to change for it.
+#
+# The weighted composition below was byte-identical to the single SYSTEM string
+# that preceded the split until the `targets` rule was added to _VERDICTS on
+# 2026-09-04; runs measured before that were measured without that sentence.
 
 _HEAD = """You are a writing agent working in a small file workspace.
 
@@ -59,6 +65,11 @@ _VERDICTS = """- Do not claim a requirement is met. Make it checkable, then chec
 - Every edit comes back with the checker's verdicts and a "blocking finish"
   line. When it says nothing is blocking, run_check once and then finish. Do
   not keep polishing a package that already passes.
+- Every change to a file names, in targets, the ids of the requirements it is
+  aimed at — the ones you expect it to settle, not everything the file has to
+  meet. Never leave targets empty while a requirement is red. Attempts are
+  counted per requirement: three changes aimed at one requirement that leave
+  it unmet pause the run for the user to look at.
 """
 
 # The baseline's stopping rule. It has to say something, or the loop runs to
@@ -144,12 +155,13 @@ MAX_HISTORY_BLOCKS = 14
 
 def instructions(mode="weighted"):
     """The agent's standing instructions for this server's configuration and
-    this session's condition."""
-    baseline = mode == "baseline"
-    base = SYSTEM_BASELINE if baseline else SYSTEM
+    this session's condition. Only the weighted condition has a checker to be
+    told about; both controls get the composition that never mentions one."""
+    plain = mode != "weighted"
+    base = SYSTEM_BASELINE if plain else SYSTEM
     if not tools.shell_enabled():
         return base
-    return base + (SHELL_RULES_BASELINE if baseline else SHELL_RULES)
+    return base + (SHELL_RULES_BASELINE if plain else SHELL_RULES)
 
 
 def _condense(messages):
@@ -193,8 +205,8 @@ def workspace_digest(session):
     att = session.attachments.meta()
     if att:
         lines.append("Attached by the user — read-only reference material, not part of")
-        lines.append("the deliverable" + ("" if session.mode == "baseline"
-                                          else " and not seen by the checker")
+        lines.append("the deliverable" + (" and not seen by the checker"
+                                          if session.verified else "")
                      + ". Use read_attachment:")
         for a in att:
             lines.append(f"  {a['name']} — {a['lines']} lines, {a['chars']} characters")
@@ -306,7 +318,7 @@ def _summarize_step(session, name, args, meta, changed):
         if name != "run_command" or meta.get("kind") != "edit":
             return ("The command failed; the workspace is unchanged."
                     if name == "run_command" else "")
-    if session.mode == "baseline":
+    if not session.verified:
         # Nothing checked this step, so there is nothing to say about it that
         # the step's own observation does not already say. The line stays empty
         # rather than reassuring: "everything looks met" is exactly the claim
@@ -339,6 +351,14 @@ def _summarize_step(session, name, args, meta, changed):
         if stale:
             names = ", ".join(stale) if len(stale) <= 4 else f"{len(stale)} requirements"
             lines.append(f"{names} will be re-checked when the agent stops.")
+        for rid in meta.get("targets") or []:
+            req = by_id.get(rid)
+            verdict = ((req or {}).get("report") or {}).get("verdict")
+            if verdict in ("violated", "partial"):
+                n = attempts(session, rid) + 1
+                lines.append(f"This change was aimed at {rid}, which is still "
+                             f"{_VWORDS.get(verdict, verdict)} — attempt {n} of "
+                             f"{STUCK_AFTER}.")
         if not R.blocking(session.requirements):
             lines.append("Everything checked so far is met.")
         return "\n".join(lines)
@@ -347,9 +367,30 @@ def _summarize_step(session, name, args, meta, changed):
     return ""
 
 
-def _verdict_lines(session, changed):
-    """The verifier's answer to an edit, in the observation the agent reads."""
+def _aim_lines(session, targets):
+    """What the change just made was aimed at, and how many attempts that is.
+    The step is not in the event log yet when this runs, so the count is the
+    log's plus this one."""
     lines = []
+    for rid in targets or []:
+        req = next((r for r in session.requirements if r["id"] == rid), None)
+        if not req:
+            continue
+        verdict = (req.get("report") or {}).get("verdict")
+        if verdict in ("violated", "partial"):
+            n = attempts(session, rid) + 1
+            lines.append(f"aimed at {rid}: still {verdict} — attempt {n} of "
+                         f"{STUCK_AFTER}"
+                         + ("; the run pauses here for the user"
+                            if n >= STUCK_AFTER else ""))
+        else:
+            lines.append(f"aimed at {rid}: now {verdict}")
+    return lines
+
+
+def _verdict_lines(session, changed, targets=None):
+    """The verifier's answer to an edit, in the observation the agent reads."""
+    lines = _aim_lines(session, targets)
     for c in changed:
         req = next((r for r in session.requirements if r["id"] == c["id"]), None)
         if not req:
@@ -376,7 +417,7 @@ def _verify_and_apply(session, judge=False):
     return changed
 
 
-# How many edits a requirement may survive before the loop gives up on it.
+# How many attempts a requirement may survive before the loop gives up on it.
 STUCK_AFTER = int(os.environ.get("WEIGHTTEXT_STUCK_AFTER", "3"))
 
 
@@ -384,64 +425,173 @@ def _slug(name):
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
-def _stuck(session, limit=None):
-    """Requirements that are still violated after `limit` edits aimed at them.
+def attempts(session, req_id, limit=None):
+    """How many successful changes AIMED AT `req_id` have gone by since it was
+    last satisfied, or since the user last continued the run — capped at
+    `limit`, because past the cap the count no longer changes anything.
 
-    An unattended run can spend its whole budget on one requirement it is never
-    going to settle. That happened for real: a run edited a finished biography
-    for forty more steps because the judge would not accept "the spousal
-    relationship beginning on 1992-07-05" as a reading of the triple `spouse of
-    start date - 1992-07-05`, and `finish` is rejected while anything is
-    violated, so there was no way out of it.
+    "Aimed at" is the agent's own word: every file-changing tool in the
+    weighted condition carries `targets`, the requirement ids the change is
+    meant to settle, and only those changes count. An edit that fixes the
+    date column is not an attempt at the whitespace rule, however many times
+    it touches the file — counting it as one paused runs three steps in over
+    requirements the agent had not started on.
 
     Counted from the event log rather than from a field on the session, so a
-    reloaded session gets the same answer. An edit "aimed at" a requirement is
-    simply any successful edit: what matters is that three of them went by and
-    the verdict never turned.
+    reloaded session gets the same answer. A `resume` event — the user pressed
+    continue after a pause — is a floor: what came before it was the user's to
+    look at, and they have looked.
     """
     limit = STUCK_AFTER if limit is None else limit
-    open_reqs = [r for r in session.requirements
-                 if r.get("status") == "active"
-                 and (r.get("report") or {}).get("verdict") in ("violated", "partial")]
-    if not open_reqs:
-        return []
-
-    # Edits are counted PER requirement, against the file each one is about. A
-    # requirement scoped to answer.md is not being failed by three edits to
-    # cleaned.csv — the agent has not got to it yet — and counting those was
-    # enough to pause a run three steps in, on a table it had just repaired
-    # correctly, over a file it had not started.
-    stuck = []
-    for req in open_reqs:
-        scope = req.get("scope") or {}
-        want = scope.get("name") if scope.get("kind") == "file" else None
-        edits, settled = 0, False
-        for ev in reversed(session.events):
-            if ev.get("type") != "step":
-                continue
-            if any(c.get("id") == req["id"] and c.get("verdict") == "satisfied"
-                   for c in ev.get("chips") or []):
-                settled = True
+    req = next((r for r in session.requirements if r["id"] == req_id), None) or {}
+    scope = req.get("scope") or {}
+    want = scope.get("name") if scope.get("kind") == "file" else None
+    n = 0
+    for ev in reversed(session.events):
+        if ev.get("type") == "resume":
+            break
+        if ev.get("type") != "step":
+            continue
+        if any(c.get("id") == req_id and c.get("verdict") == "satisfied"
+               for c in ev.get("chips") or []):
+            break
+        meta = ev.get("meta") or {}
+        if meta.get("kind") != "edit" or not meta.get("ok"):
+            continue
+        targets = meta.get("targets") or []
+        if targets:
+            aimed = req_id in targets
+        else:
+            # The agent said nothing about what the change was for. That is
+            # not a way out of the count: an unattributed change counts
+            # against every requirement open at the time, in the file it is
+            # scoped to — the rule this one replaced, kept as the floor for an
+            # agent that will not name its targets (gpt-5-nano, at first, on
+            # every edit). Only edits with no targets field at all — the
+            # baseline's — count for nothing, and the baseline has no rail.
+            path = meta.get("path")
+            aimed = ("targets" in meta
+                     and not (want and path and _slug(path) != _slug(want)))
+        if aimed:
+            n += 1
+            if n >= limit:
                 break
-            meta = ev.get("meta") or {}
-            if meta.get("kind") == "edit" and meta.get("ok"):
-                path = meta.get("path")
-                if want and path and _slug(path) != _slug(want):
-                    continue
-                edits += 1
-                if edits >= limit:
-                    break
-        if edits >= limit and not settled:
-            stuck.append(req["id"])
-    return sorted(stuck)
+    return n
+
+
+def _stuck(session, limit=None):
+    """Requirements still violated after `limit` attempts aimed at them."""
+    limit = STUCK_AFTER if limit is None else limit
+    return sorted(
+        r["id"] for r in session.requirements
+        if r.get("status") == "active"
+        and (r.get("report") or {}).get("verdict") in ("violated", "partial")
+        and attempts(session, r["id"], limit) >= limit)
+
+
+_STUCK_WORDS = re.compile(r"\b(stuck|blocked|cannot|can't|unable|need|permission|"
+                          r"clarif|which|should i|contradict)\b|\?", re.I)
+_ANNOUNCES = re.compile(r"^\s*(i will|i'll|i am going to|i'm going to|next,? i|let me)\b", re.I)
+
+
+RESUME_TEXT = ("Continue. The user has read the pause and chose to go on; the "
+               "attempt count starts over. Take the next concrete action now — "
+               "do not reply with a message.")
+RESUME_RETRY = ("The user has already read that and pressed continue. Do not "
+                "reply again; act — make the next tool call now.")
+PAUSE_ASK = ("The run has paused: {notice} Tell the user, in one sentence, where "
+             "you are stuck and what from them would unblock you. One sentence, "
+             "no tool call.")
+
+_SENTENCE_END = re.compile(r"[.!?。！？](?=\s+[A-Z“\"(]|$)")
+_ABBREV = re.compile(r"(?:^|[\s(“\"])(?:[A-Z]\.)+$|\b(?:e\.g|i\.e|etc|vs|Mr|Ms|Dr|No)\.$")
+
+
+def _one_sentence(text):
+    """The first sentence of a reply, whole — gpt-5.6 at its lowest effort
+    likes to say the same thing twice in a row, and the pause wants one line.
+    A period inside an abbreviation ("S.S. Nieuw Amsterdam", "e.g.") does not
+    end the sentence."""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = line.strip("\"'“”‘’ ")
+    for m in _SENTENCE_END.finditer(line):
+        head = line[:m.end()]
+        if _ABBREV.search(head):
+            continue
+        return head.strip()
+    return line
+
+
+def pause_word(session, notice):
+    """At a pause, one sentence from the agent to the user: where it is stuck
+    and what would unblock it. Spoken here rather than on continue — the
+    participant reads it beside the notice, and continue then acts. The ask
+    itself is not kept in the transcript; the agent's sentence is, so what the
+    model last said is what the participant last read. Returns the sentence
+    or None (a failed call just leaves the pause with the notice alone)."""
+    messages, _ = build_messages(session)
+    messages = messages + [{"role": "user", "content": PAUSE_ASK.format(notice=notice)}]
+    try:
+        msg = llm.chat(messages, model=llm.AGENT_MODEL, max_tokens=300)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[loop] pause_word failed: {type(e).__name__}: {e}", flush=True)
+        return None
+    text = _one_sentence((msg.content or "").strip())
+    if not text:
+        return None
+    session.llm_messages.append({"role": "assistant", "content": text})
+    session.log("assistant", text=text, pause=True)
+    return text
+
+
+def _not_speech(session, text):
+    """A reply that is not the agent talking to the user, and what to tell it.
+
+    Three shapes, all seen from gpt-5-nano: the deliverable pasted into the
+    chat (a wall of code where a sentence belongs, or anything at all while
+    the workspace is still empty); a narration of the next action ("I will
+    create a local copy…") in place of the action; and a closing summary ("I
+    have delivered solution.py…") in place of finish, with nothing blocking.
+    None of those is the one thing a reply is for — saying it is stuck — and
+    a reply that says that (stuck, blocked, need, a question mark) is left
+    alone. Returns the nudge to send, or None.
+    """
+    if not session.workspace.list() or text.count("\n") >= 15:
+        return ("That reply is not a file. Nothing written in a message reaches "
+                "the workspace or the checker: create or change the deliverable "
+                "with write_file, edit_file or insert_file, and use a message only "
+                "to say you are stuck. Take the next concrete action now.")
+    if _STUCK_WORDS.search(text):
+        return None
+    if _ANNOUNCES.match(text):
+        return ("That reply announces an action instead of taking it. Take it: "
+                "call the tool now.")
+    if session.verified and not R.blocking(session.requirements):
+        return ("Nothing is blocking. If the work is complete, call finish; "
+                "otherwise take the next concrete action. A message does not "
+                "close the run.")
+    if not session.verified:
+        return ("If the work is complete, call finish; otherwise take the next "
+                "concrete action. A message does not close the run.")
+    return None
 
 
 def step(session):
     """Plan and take exactly one action. Returns the events it produced."""
     if session.status == "done":
         return []
-    session.status = "running"
     start_index = len(session.events)
+    if session.status == "paused":
+        # The user pressed continue (or steered) after a pause. Attempt counts
+        # start over from here: whatever the rail had to say about the pause,
+        # they have seen it. The model has to be told so: the last thing it
+        # read was an observation ending "the run pauses here for the user",
+        # and left there it answers the pause instead of the user — "I cannot
+        # continue without review" — and the first press of continue produces
+        # a sentence, not a step.
+        session.log("resume")
+        session.llm_messages.append({"role": "user", "content": RESUME_TEXT})
+    session.status = "running"
 
     if session.pending_steer:
         text = session.pending_steer
@@ -454,9 +604,10 @@ def step(session):
     # The access log only prints on completion, so an in-flight step is
     # invisible there — say so up front instead.
     print(f"[step] session={session.id} step={session.step_count + 1} "
-          f"calling {llm.MODEL}…", flush=True)
+          f"calling {llm.AGENT_MODEL}…", flush=True)
     try:
-        msg = llm.chat(messages, tools=tools.schemas(session.mode))
+        msg = llm.chat(messages, tools=tools.schemas(session.mode),
+                       model=llm.AGENT_MODEL)
     except Exception as e:                                    # noqa: BLE001
         session.status = "paused"
         session.log("error", text=f"{type(e).__name__}: {e}")
@@ -497,6 +648,41 @@ def step(session):
         return session.events[start_index:]
 
     if not calls:
+        last_user = next((m for m in reversed(session.llm_messages)
+                          if m.get("role") == "user"), None)
+        if last_user and last_user.get("content") == RESUME_TEXT:
+            # The user pressed continue and the agent answered with words
+            # anyway. Once, it is sent back to act; the second time it is
+            # speech like any other and ends the turn.
+            session.llm_messages.append({"role": "assistant", "content": thought})
+            session.llm_messages.append({"role": "user", "content": RESUME_RETRY})
+            session.status = "idle"
+            session.log("trace", kind="resume-reply",
+                        text=("The agent replied instead of acting after continue; "
+                              "the loop asked it to act."))
+            session.save()
+            return session.events[start_index:]
+        # A message that IS the deliverable — the file's contents pasted into
+        # the chat, a wall of code where a sentence belongs — is the model
+        # failing to use its tools, not a decision to talk to the user.
+        # gpt-5-nano does this on about one first turn in four, and a run that
+        # ends there has nothing on disk and nothing checked. So it is sent
+        # back to the tools, at most twice in a row; a reply that survives
+        # that is treated as speech, as any other reply is.
+        why = _not_speech(session, thought)
+        nudged = sum(1 for e in session.events[-6:]
+                     if e.get("type") == "trace" and e.get("kind") == "paste")
+        if why and nudged < 2:
+            session.llm_messages.append({"role": "assistant", "content": thought})
+            session.llm_messages.append({"role": "user", "content": why})
+            session.status = "idle"
+            session.log("trace", kind="paste",
+                        text=("The model replied instead of acting — a pasted file, "
+                              "an announced action, or a summary in place of finish; "
+                              "the loop asked it to use the tools."))
+            session.save()
+            return session.events[start_index:]
+
         # No action: the agent is talking to the user. That ends the run and
         # hands control back — it is not a failure.
         session.llm_messages.append({"role": "assistant", "content": thought})
@@ -533,9 +719,9 @@ def step(session):
             observation, meta = tools.execute(session, name, args)
         gate_event = None
 
-        if name == "finish" and session.mode == "baseline":
+        if name == "finish" and not session.verified:
             # There is nothing to verify and nothing to hold the finish on.
-            # The agent's word that it is done is the whole of the baseline's
+            # The agent's word that it is done is the whole of the controls'
             # stopping rule, which is the condition, not an oversight.
             changed = []
             session.status = "done"
@@ -554,7 +740,7 @@ def step(session):
                 gate_event = {"blocked": [r["id"] for r in blocked]}
             else:
                 session.status = "done"
-        elif session.mode == "baseline":
+        elif not session.verified:
             # No verifier, so no chips and no verdict lines appended to the
             # observation. The agent sees what its own tool call returned and
             # nothing else — which is the point of the comparison.
@@ -573,7 +759,8 @@ def step(session):
                 # word count it just changed wastes a step and teaches it to
                 # trust its own estimate — which is the failure this system
                 # exists to prevent.
-                observation += "\n" + _verdict_lines(session, changed)
+                observation += "\n" + _verdict_lines(session, changed,
+                                                     meta.get("targets"))
 
         session.llm_messages.append({"role": "tool", "tool_call_id": call.id,
                                      "content": observation[:6000]})
@@ -595,22 +782,26 @@ def step(session):
                        and c.get("from") == "satisfied"]
         if regressions:
             session.status = "paused"
-            session.log("notice",
-                        text="Loop paused: critical requirement broke — "
-                             + ", ".join(c["id"] for c in regressions))
+            text = ("Loop paused: critical requirement broke — "
+                    + ", ".join(c["id"] for c in regressions))
+            session.log("notice", text=text)
+            pause_word(session, text)
             break
 
-        # Three edits and the same requirement is still red. Either the agent
-        # cannot settle it or the verdict is wrong, and both of those are for a
-        # person to look at — going round a fourth time only spends the budget.
+        # Three changes aimed at the same requirement and it is still red.
+        # Either the agent cannot settle it or the verdict is wrong, and both
+        # of those are for a person to look at — going round a fourth time
+        # only spends the budget.
         stuck = _stuck(session)
         if stuck:
             session.status = "paused"
-            session.log("notice",
-                        text=(f"Loop paused: no progress on {', '.join(stuck)} "
-                              f"after {STUCK_AFTER} edits. Either steer it, or "
-                              f"check whether the verdict is right."),
-                        stuck=stuck)
+            text = (f"Loop paused: {', '.join(stuck)} still not met "
+                    f"after {STUCK_AFTER} changes aimed at "
+                    f"{'it' if len(stuck) == 1 else 'them'}. Either "
+                    f"steer it, or check whether the verdict is "
+                    f"right. Continue starts the count over.")
+            session.log("notice", text=text, stuck=stuck)
+            pause_word(session, text)
             break
 
     if session.status == "running":

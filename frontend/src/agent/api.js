@@ -50,7 +50,7 @@ async function get(path, params) {
 }
 
 export const api = {
-  createSession: (brief, mode) => post('/session', { brief, mode }),
+  createSession: (brief, mode, participant) => post('/session', { brief, mode, participant }),
   state: (sessionId) => get('/state', { sessionId }),
   extract: (brief, sessionId) => post('/extract', { brief, sessionId }),
   answer: (sessionId, requirement, question, answer) =>
@@ -69,6 +69,7 @@ export const api = {
   presets: () => get('/presets'),
   attach: (sessionId, names) => post('/attach', { sessionId, names }),
   attachment: (sessionId, name) => get('/attachment', { sessionId, name }),
+  submit: (sessionId, reason, elapsed) => post('/submit', { sessionId, reason, elapsed }),
   telemetry: (sessionId, action, payload) =>
     post('/telemetry', { sessionId, action, payload }).catch(() => {}),
   exportUrl: (sessionId) => `${BASE}/export?sessionId=${sessionId}`,

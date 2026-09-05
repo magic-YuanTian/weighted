@@ -56,7 +56,9 @@ Extract the requirements. Rules:
                                       "convention":"snake_case"|"CamelCase"|"UPPER_SNAKE"}}
                                      (kind is exactly what the brief says. A rule
                                       about VARIABLE names says nothing about a
-                                      class name, and vice versa.)
+                                      class name, and vice versa. A rule about
+                                      INTERFACE names names no Python construct:
+                                      that one is `content`.)
                        defines       {{"kind":"function"|"class"|"variable","name":"..."}}
                                      (the name has to be one the brief itself
                                       gives, spelled as the brief spells it. A
@@ -107,6 +109,15 @@ Extract the requirements. Rules:
                                       docstring must say what it returns" is a
                                       separate `content` requirement.)
                        max_classes   {{"max": 2}}
+                       returns       {{"call":"max_subsequence([1,2,3,7,2,10])",
+                                      "expect":"5"}}
+                                     (ONLY for a worked example the brief itself
+                                      states, input and output both — ">>> f(3)
+                                      True", "Input: nums = [8,6,1,5,3] Output:
+                                      9". Copy the call and the result exactly,
+                                      one requirement per example; never invent
+                                      one, and never write the answer to the
+                                      task itself as an example.)
                      A code constraint none of these fits is `content`,
                      never a code-prop with no prop: a property the
                      checker does not have cannot be checked at all.
@@ -139,9 +150,44 @@ Extract the requirements. Rules:
                                       rows hold that value. Scope this one to
                                       the file the answer goes in; the count
                                       itself is taken from the table.)
-                     A rule about WHICH values become what — fold these five
-                     spellings onto DINNER, uppercase but keep the typo — is
-                     not one of these. That is `content`.
+                       trimmed_copy  {{"columns":["event","notes"]}}
+                                     ("trim the padded whitespace and change
+                                      nothing else": every cell is the source
+                                      cell trimmed. Only where trimming is the
+                                      ONLY thing the brief does to the column.)
+                       no_padding    {{"columns":["event"]}}   (no cell starts or
+                                      ends with whitespace; use it where the
+                                      column is trimmed AND changed otherwise)
+                       single_spaces {{"columns":["event"]}}   ("collapse runs of
+                                      spaces into one")
+                       value_map     {{"column":"sponsor","from":["Adams' Restaurant",
+                                      "Adam's Restaurant"],"to":"ADAM'S RESTAURANT"}}
+                                     (a rule that says WHICH source values become
+                                      what: "BREAKFAST MENU is BREAKFAST", "the
+                                      placeholder [...] is emptied" — `to` is ""
+                                      then —, "1949-23-12 belongs at
+                                      1949-12-23T00:00:00Z". One requirement per
+                                      target value, `from` spelled exactly as the
+                                      brief spells the source values, `to` the
+                                      final value the cell must hold.)
+                       no_characters {{"columns":["sponsor"],"characters":";_-"}}
+                                     ("turn every semicolon, underscore and
+                                      hyphen into a space": none may remain)
+                       column_pattern {{"column":"date",
+                                       "pattern":"\\d{{4}}-\\d{{2}}-\\d{{2}}T00:00:00Z"}}
+                                     (every non-blank value has this shape —
+                                      a date format, a code without its
+                                      decoration. A Python regex, matched in
+                                      full; blank cells are skipped.)
+                     A rule stated as a PROCEDURE over every value — turn
+                     hyphens into spaces, collapse the spaces, trim, uppercase;
+                     write every date as YYYY-MM-DDT00:00:00Z — is written as
+                     the properties it decomposes into, one requirement each:
+                     no_characters, single_spaces, no_padding, column_case,
+                     column_pattern. Write the examples the brief gives for it
+                     as value_map requirements too, because those are exact.
+                     Only what none of these can state — how an ambiguous date
+                     is read, which spelling a fold keeps — is `content`.
     content          a claim about what the text must say, or about what code
                      MEANS — does it compute the right thing, does a sentence
                      say what it should                     (judged)
@@ -199,6 +245,15 @@ _TABLE_NAMED_PARAMS = {
     "only_columns_change": ("columns",),
     "column_case": ("column",),
     "count_matches": ("column", "value"),
+    "trimmed_copy": ("columns",),
+    "no_padding": ("columns",),
+    "single_spaces": ("columns",),
+    "no_characters": ("columns",),
+    "column_pattern": ("column",),
+    # `to` is deliberately not here: "emptied" is a `to` of "", which no brief
+    # spells out, and the value a cell must END as is the brief's claim to
+    # make. The source spellings it maps FROM must be the brief's own.
+    "value_map": ("column", "from"),
 }
 
 _NAMED_PARAMS = {
@@ -268,6 +323,7 @@ def _says(text, words):
 # them.
 _PRESENCE_PROPS = ("imports", "module_level", "assigned_once", "defines",
                    "initializes", "uses", "single_return", "docstrings")
+_WS = re.compile(r"\s+")
 _NEGATION = re.compile(r"\b(?:not|never|no|without|avoid|cannot|nor)\b"
                        r"|\bn't\b|\bout of\b", re.I)
 
@@ -290,12 +346,15 @@ def _grounded(brief, raw):
             str(params.get("prop") or "").strip().lower())
         if not keys:
             return True
-        haystack = brief.lower()
+        # Whitespace collapsed on both sides: the brief wraps its lines, so a
+        # value it spells across a line break — "[Restaurant name\nand/or
+        # location not given]" — is still the brief's own spelling.
+        haystack = _WS.sub(" ", brief.lower())
         for key in keys:
             value = params.get(key)
             values = value if isinstance(value, (list, tuple)) else [value]
             for v in values:
-                v = str(v or "").strip().lower()
+                v = _WS.sub(" ", str(v or "").strip().lower())
                 if v and v not in haystack:
                     return False
         return True
@@ -329,6 +388,26 @@ def _grounded(brief, raw):
 
     if prop == "naming":
         return _says(said, _NAMING_WORDS)
+
+    # Three caps that read alike and check nothing alike. "Should not exceed
+    # 14 lines" came back as max_line_length (every line failed), "at most two
+    # parameters" as max_functions (four functions, cap two). Each cap has to
+    # be grounded in the unit its own sentence names.
+    if prop == "max_line_length":
+        return _says(said, ("character", "width", "column", "wide", "long"))
+    if prop == "max_total_lines" or prop == "max_function_lines":
+        return _says(said, ("line",))
+    if prop == "max_functions":
+        return _says(said, ("function", "method")) and not _says(said, ("parameter", "argument"))
+    if prop == "max_classes":
+        return _says(said, ("class",))
+
+    # An example is the brief's or it is nobody's: the expected value has to
+    # be written in the brief, or the check is grading code against a number
+    # the extractor made up.
+    if prop == "returns":
+        expect = _WS.sub(" ", str(params.get("expect") if params.get("expect") is not None else "")).strip()
+        return bool(expect) and expect.lower() in _WS.sub(" ", brief.lower())
 
     keys = _NAMED_PARAMS.get(prop)
     if not keys:
